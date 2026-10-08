@@ -8,6 +8,10 @@ set(CMAKE_C_COMPILER "$ENV{PSPDEV}/bin/psp-gcc" CACHE FILEPATH "" FORCE)
 
 project(deadspace_psp C)
 
+set(PSP_SDK "$ENV{PSPDEV}/psp/sdk")
+include_directories("${PSP_SDK}/include")
+link_directories("${PSP_SDK}/lib")
+
 add_executable(EBOOT.ELF
     src/main.c
     src/runtime/donor_elf.c
