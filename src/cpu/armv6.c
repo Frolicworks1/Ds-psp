@@ -89,10 +89,48 @@ static uint32_t operand2(DsArmv6Cpu *cpu, uint32_t insn, unsigned *carry) {
 
 void ds_armv6_reset(DsArmv6Cpu *cpu, uint32_t entry) {
     memset(cpu, 0, sizeof(*cpu));
-    cpu->pc = entry;
+    cpu->pc = entry & ~1u;
+    cpu->thumb = entry & 1u;
+}
+
+static int thumb_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
+    uint32_t off, hw, next, target;
+    if (!cpu || !image || cpu->pc < image->load_addr) return -1;
+    off=cpu->pc-image->load_addr;
+    if (off > image->size || image->size-off < 2) return -1;
+    memcpy(&hw,image->base+off,2);
+    next=cpu->pc+2;
+    /* MOVS/ADDS/SUBS immediate */
+    if ((hw & 0xe000u)==0x2000u) {
+        unsigned rd=(hw>>8)&7u; uint32_t imm=hw&0xffu; unsigned op=(hw>>11)&3u;
+        if(op==0) cpu->r[rd]=imm;
+        else if(op==1) cpu->r[rd]+=imm;
+        else if(op==2) cpu->r[rd]-=imm;
+        else cpu->r[rd]=imm;
+        cpu->cpsr=(cpu->cpsr&~(N_FLAG|Z_FLAG))|(cpu->r[rd]&0x80000000u)|(cpu->r[rd]?0:Z_FLAG);
+        cpu->pc=next; ++cpu->steps; return 0;
+    }
+    /* BX/BLX register */
+    if ((hw & 0xff87u)==0x4700u) {
+        unsigned rm=(hw>>3)&0xfu; target=cpu->r[rm];
+        cpu->pc=target&~1u; cpu->thumb=target&1u; ++cpu->steps; return 0;
+    }
+    /* Conditional branch */
+    if ((hw&0xf000u)==0xd000u && ((hw>>8)&0xfu)!=0xfu) {
+        unsigned cond=(hw>>8)&0xfu; int8_t imm=(int8_t)(hw&0xffu);
+        if(cond_ok(cpu->cpsr,cond)) cpu->pc=next+((int32_t)imm<<1); else cpu->pc=next;
+        ++cpu->steps; return 0;
+    }
+    /* Unconditional branch */
+    if ((hw&0xf800u)==0xe000u) {
+        int32_t imm=(int32_t)(hw&0x7ffu); if(imm&0x400) imm|=~0x7ff;
+        cpu->pc=next+(imm<<1); ++cpu->steps; return 0;
+    }
+    return -20;
 }
 
 int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
+    if (cpu && cpu->thumb) return thumb_step(cpu,image);
     uint32_t insn, op1, op2, result;
     unsigned cond, rn, rd, carry = (cpu->cpsr & C_FLAG) != 0;
     uint32_t next_pc;
