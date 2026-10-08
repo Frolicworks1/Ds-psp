@@ -1,0 +1,48 @@
+cmake_minimum_required(VERSION 3.16)
+
+if(NOT DEFINED ENV{PSPDEV})
+    message(FATAL_ERROR "PSPDEV is not set")
+endif()
+
+set(CMAKE_C_COMPILER "$ENV{PSPDEV}/bin/psp-gcc" CACHE FILEPATH "" FORCE)
+
+project(deadspace_psp C)
+
+set(PSP_SDK "$ENV{PSPDEV}/psp/sdk")
+include_directories("${PSP_SDK}/include")
+link_directories("${PSP_SDK}/lib")
+
+add_executable(EBOOT.ELF
+    src/main.c
+    src/runtime/donor_elf.c
+    src/runtime/log.c
+    src/runtime/data.c
+    src/runtime/runtime.c
+    src/runtime/arm_elf.c
+    src/runtime/arm_loader.c
+    src/runtime/reloc.c
+    src/runtime/imports.c
+    src/cpu/armv6.c
+)
+
+target_compile_options(EBOOT.ELF PRIVATE -O2 -G0 -Wall -Wextra)
+target_link_options(EBOOT.ELF PRIVATE -G0)
+target_link_libraries(EBOOT.ELF pspgu pspge pspdisplay pspctrl pspkernel)
+
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/PARAM.SFO"
+    COMMAND mksfoex "Dead Space PSP" "${CMAKE_CURRENT_BINARY_DIR}/PARAM.SFO"
+    DEPENDS EBOOT.ELF
+)
+
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/EBOOT.PBP"
+    COMMAND psp-fixup-imports "${CMAKE_CURRENT_BINARY_DIR}/EBOOT.ELF"
+    COMMAND pack-pbp "${CMAKE_CURRENT_BINARY_DIR}/EBOOT.PBP"
+            "${CMAKE_CURRENT_BINARY_DIR}/PARAM.SFO"
+            NULL NULL NULL NULL NULL
+            "${CMAKE_CURRENT_BINARY_DIR}/EBOOT.ELF" NULL
+    DEPENDS EBOOT.ELF "${CMAKE_CURRENT_BINARY_DIR}/PARAM.SFO"
+)
+
+add_custom_target(EBOOT ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/EBOOT.PBP")
