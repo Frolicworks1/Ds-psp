@@ -123,6 +123,76 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         return 0;
     }
 
+    /* Single data transfer: LDR/STR (word/byte), immediate or register offset. */
+    if ((insn & 0x0c000000u) == 0x04000000u) {
+        unsigned rn2 = (insn >> 16) & 0xfu;
+        unsigned rd2 = (insn >> 12) & 0xfu;
+        unsigned byte = (insn >> 22) & 1u;
+        unsigned pre = (insn >> 24) & 1u;
+        unsigned up = (insn >> 23) & 1u;
+        unsigned wb = (insn >> 21) & 1u;
+        unsigned load = (insn >> 20) & 1u;
+        uint32_t off;
+        if (insn & 0x02000000u) {
+            unsigned rm = insn & 0xfu;
+            off = cpu->r[rm];
+            unsigned st = (insn >> 5) & 3u;
+            unsigned sh = (insn >> 7) & 0x1fu;
+            if (st == 0) off = sh ? off << sh : off;
+            else if (st == 1) off = sh ? off >> sh : 0;
+            else if (st == 2) off = sh ? (uint32_t)((int32_t)off >> sh)
+                                      : ((off & 0x80000000u) ? 0xffffffffu : 0);
+            else off = sh ? ror32(off, sh) : ((cpu->cpsr & C_FLAG) ? 0x80000000u : 0);
+        } else {
+            off = insn & 0xfffu;
+        }
+        uint32_t base_addr = cpu->r[rn2];
+        uint32_t addr = pre ? (up ? base_addr + off : base_addr - off) : base_addr;
+        uint32_t updated = up ? base_addr + off : base_addr - off;
+        uint32_t value = 0;
+        uint32_t mem_off;
+        if (addr < image->load_addr) return -3;
+        mem_off = addr - image->load_addr;
+        if (mem_off >= image->size || image->size - mem_off < (byte ? 1u : 4u)) return -3;
+        if (load) {
+            if (byte) value = image->base[mem_off];
+            else memcpy(&value, image->base + mem_off, 4);
+            if (rd2 == 15u) cpu->pc = value & ~1u;
+            else cpu->r[rd2] = value;
+        } else {
+            value = (rd2 == 15u) ? cpu->pc + 8u : cpu->r[rd2];
+            if (byte) image->base[mem_off] = (uint8_t)value;
+            else memcpy(image->base + mem_off, &value, 4);
+        }
+        if (!pre || wb) cpu->r[rn2] = updated;
+        if (load && rd2 == 15u) cpu->pc = value & ~1u;
+        else cpu->pc = next_pc;
+        ++cpu->steps;
+        return 0;
+    }
+
+    /* MUL/MLA, with optional flag update. */
+    if ((insn & 0x0fc000f0u) == 0x00000090u) {
+        unsigned rd2 = (insn >> 16) & 0xfu;
+        unsigned rn2 = (insn >> 12) & 0xfu;
+        unsigned rs2 = (insn >> 8) & 0xfu;
+        unsigned rm2 = insn & 0xfu;
+        uint32_t value = cpu->r[rm2] * cpu->r[rs2];
+        if (insn & 0x00200000u) value += cpu->r[rn2];
+        cpu->r[rd2] = value;
+        if (insn & 0x00100000u) {
+            cpu->cpsr &= ~(N_FLAG | Z_FLAG);
+            if (value & 0x80000000u) cpu->cpsr |= N_FLAG;
+            if (!value) cpu->cpsr |= Z_FLAG;
+        }
+        cpu->pc = next_pc;
+        ++cpu->steps;
+        return 0;
+    }
+
+    /* BX was handled above; SWI is surfaced as a host/runtime trap. */
+    if ((insn & 0x0f000000u) == 0x0f000000u) return -4;
+
     if ((insn & 0x0c000000u) != 0) return -2;
 
     rn = (insn >> 16) & 0xfu;
@@ -194,7 +264,7 @@ int ds_armv6_selftest(void) {
     DsArmv6Cpu cpu;
     DsArmv6Image image;
     ds_armv6_reset(&cpu, 0x1000u);
-    image.base = (const uint8_t *)program;
+    image.base = (uint8_t *)(uintptr_t)program;
     image.size = sizeof(program);
     image.load_addr = 0x1000u;
 
