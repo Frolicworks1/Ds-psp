@@ -202,6 +202,39 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         return 0;
     }
 
+    /* LDM/STM block transfer, including PUSH/POP stack forms. */
+    if ((insn & 0x0e000000u) == 0x08000000u) {
+        unsigned rn2=(insn>>16)&0xfu;
+        unsigned pre=(insn>>24)&1u, up=(insn>>23)&1u, wb=(insn>>21)&1u;
+        unsigned load=(insn>>20)&1u;
+        uint32_t list=insn&0xffffu;
+        unsigned count=0;
+        for (unsigned i=0;i<16;++i) if (list&(1u<<i)) ++count;
+        if (!count) return -2;
+        uint32_t base=cpu->r[rn2];
+        uint32_t addr;
+        if (up) addr=base+(pre?4u:0u);
+        else addr=base-(pre?4u:0u)-4u*(count-1u);
+        for (unsigned i=0;i<16;++i) if (list&(1u<<i)) {
+            if (addr < image->load_addr) return -3;
+            uint32_t mo=addr-image->load_addr;
+            if (mo>image->size+image->heap_size || image->size+image->heap_size-mo<4) return -3;
+            if (load) {
+                uint32_t v; memcpy(&v,image->base+mo,4);
+                if (i==15u) { cpu->pc=v&~1u; cpu->thumb=v&1u; }
+                else cpu->r[i]=v;
+            } else {
+                uint32_t v=(i==15u)?cpu->pc+8u:cpu->r[i];
+                memcpy(image->base+mo,&v,4);
+            }
+            addr+=4u;
+        }
+        if (wb) cpu->r[rn2]=up ? base+4u*count : base-4u*count;
+        if (!(load && (list&0x8000u))) cpu->pc=next_pc;
+        ++cpu->steps;
+        return 0;
+    }
+
     /* Single data transfer: LDR/STR (word/byte), immediate or register offset. */
     if ((insn & 0x0c000000u) == 0x04000000u) {
         unsigned rn2 = (insn >> 16) & 0xfu;
