@@ -149,8 +149,8 @@ int dspsp_inspect_donor(const char *path, char *report, unsigned int report_size
              (unsigned)eh.e_type);
     appendf(report, report_size, &used, " loads=%u needed=%u",
             load_count);
-    appendf(report, report_size, &used, " rel=%u plt=%u",
-            relsz, pltrelsz);
+    appendf(report, report_size, &used, " rel=%u", relsz);
+    appendf(report, report_size, &used, " plt=%u", pltrelsz);
 
     unsigned int sym_count = 0, hash_off = 0, str_off = 0, sym_off = 0;
     if (hash && vaddr_to_file(loads, load_count, hash, &hash_off) == 0) {
