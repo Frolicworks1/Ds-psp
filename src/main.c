@@ -6,6 +6,8 @@
 #include "runtime/runtime.h"
 #include "runtime/log.h"
 #include "runtime/arm_elf.h"
+#include "runtime/arm_loader.h"
+#include "runtime/reloc.h"
 #include "cpu/armv6.h"
 
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
@@ -47,6 +49,18 @@ int main(void) {
         donor_report, sizeof(donor_report));
     dspsp_log("donor status=%d report=%s", elf_status, donor_report);
 
+    DsArmImage arm_image;
+    int load_status = ds_arm_loader_load(
+        "ms0:/data/deadspace/guest_libs/libDeadSpace.so", &arm_image);
+    dspsp_log("ARM image load=%d base=0x%08X size=%u entry=0x%08X segments=%u",
+              load_status, arm_image.image_base, arm_image.image_size,
+              arm_image.entry, arm_image.load_segments);
+    if (load_status == 0) {
+        int reloc_status = ds_arm_apply_relocations(
+            "ms0:/data/deadspace/guest_libs/libDeadSpace.so", &arm_image);
+        dspsp_log("ARM self-relocations=%d", reloc_status);
+    }
+
     init_gu();
     dspsp_log("GU initialized; waiting for HOME");
 
@@ -58,6 +72,7 @@ int main(void) {
     }
 
     sceGuTerm();
+    ds_arm_loader_unload(&arm_image);
     dspsp_runtime_shutdown();
     sceKernelExitGame();
     return 0;
