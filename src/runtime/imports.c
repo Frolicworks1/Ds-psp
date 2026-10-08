@@ -80,36 +80,36 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
     if (!name || !cpu) return -1;
 
     if (!strcmp(name, "malloc")) {
-        cpu->r[0] = (uint32_t)(uintptr_t)malloc(cpu->r[0]);
+        cpu->r[0] = guest_alloc(cpu->r[0]);
     } else if (!strcmp(name, "calloc")) {
-        cpu->r[0] = (uint32_t)(uintptr_t)calloc(cpu->r[0], cpu->r[1]);
+        uint32_t n = cpu->r[0], size = cpu->r[1];
+        if (size && n > 0xffffffffu / size) cpu->r[0] = 0;
+        else cpu->r[0] = guest_alloc(n * size);
+        if (cpu->r[0]) memset(guest_ptr(cpu->r[0]), 0, n * size);
     } else if (!strcmp(name, "realloc")) {
-        cpu->r[0] = (uint32_t)(uintptr_t)realloc(
-            (void *)(uintptr_t)cpu->r[0], cpu->r[1]);
+        uint32_t old = cpu->r[0], size = cpu->r[1], p = guest_alloc(size);
+        if (p && old) memcpy(guest_ptr(p), guest_ptr(old), size);
+        cpu->r[0] = p;
     } else if (!strcmp(name, "free")) {
-        /* Guest heap is arena-backed; individual free is intentionally deferred. */
         cpu->r[0] = 0;
     } else if (!strcmp(name, "memset")) {
-        cpu->r[0] = (uint32_t)(uintptr_t)memset(
-            guest_ptr(cpu->r[0]), (int)cpu->r[1], cpu->r[2]);
-    } else if (!strcmp(name, "memcpy")) {
-        cpu->r[0] = (uint32_t)(uintptr_t)memcpy(
-            (void *)(uintptr_t)cpu->r[0],
-            (const void *)(uintptr_t)cpu->r[1], cpu->r[2]);
-    } else if (!strcmp(name, "memmove")) {
-        cpu->r[0] = (uint32_t)(uintptr_t)memmove(
-            (void *)(uintptr_t)cpu->r[0],
-            (const void *)(uintptr_t)cpu->r[1], cpu->r[2]);
+        uint32_t dst = cpu->r[0];
+        if (!guest_ptr(dst)) return -31;
+        memset(guest_ptr(dst), (int)cpu->r[1], cpu->r[2]);
+        cpu->r[0] = dst;
+    } else if (!strcmp(name, "memcpy") || !strcmp(name, "memmove")) {
+        uint32_t dst = cpu->r[0], src = cpu->r[1];
+        if (!guest_ptr(dst) || !guest_ptr(src)) return -31;
+        if (!strcmp(name, "memcpy")) memcpy(guest_ptr(dst), guest_ptr(src), cpu->r[2]);
+        else memmove(guest_ptr(dst), guest_ptr(src), cpu->r[2]);
+        cpu->r[0] = dst;
     } else if (!strcmp(name, "memcmp")) {
-        cpu->r[0] = (uint32_t)memcmp(
-            (const void *)(uintptr_t)cpu->r[0],
-            (const void *)(uintptr_t)cpu->r[1], cpu->r[2]);
+        cpu->r[0] = (uint32_t)memcmp(guest_ptr(cpu->r[0]), guest_ptr(cpu->r[1]), cpu->r[2]);
     } else if (!strcmp(name, "strlen")) {
         cpu->r[0] = (uint32_t)strlen((const char *)guest_ptr(cpu->r[0]));
     } else if (!strcmp(name, "strcmp")) {
-        cpu->r[0] = (uint32_t)strcmp(
-            (const char *)(uintptr_t)cpu->r[0],
-            (const char *)guest_ptr(cpu->r[1]));
+        cpu->r[0] = (uint32_t)strcmp((const char *)guest_ptr(cpu->r[0]),
+                                     (const char *)guest_ptr(cpu->r[1]));
     } else if (!strcmp(name, "__android_log_print")) {
         cpu->r[0] = 0;
     } else {
