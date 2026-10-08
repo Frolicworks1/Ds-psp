@@ -2,6 +2,7 @@
 #include <pspdisplay.h>
 #include <pspgu.h>
 #include <pspctrl.h>
+#include "runtime/donor_elf.h"
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 static unsigned int __attribute__((aligned(16))) list[262144];
@@ -22,6 +23,8 @@ static void init_gu(void) {
     sceGuDisplay(GU_TRUE);
 }
 int main(void) {
+    char donor_report[128];
+    dspsp_inspect_donor("ms0:/data/deadspace/lib/armeabi/libEAMGameDeadSpace.so", donor_report, sizeof(donor_report));
     init_gu();
     SceCtrlData pad;
     while (1) {
