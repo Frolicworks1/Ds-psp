@@ -41,3 +41,7 @@ Testing/
 
 # User-supplied commercial game data
 psp_data/
+
+# Local full game bundle generated from the user's APK
+DeadSpace-PSP-Bundle/
+*.zip
