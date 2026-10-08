@@ -8,6 +8,7 @@
 #include "runtime/arm_elf.h"
 #include "runtime/arm_loader.h"
 #include "runtime/reloc.h"
+#include "runtime/imports.h"
 #include "cpu/armv6.h"
 
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
@@ -35,6 +36,7 @@ static void init_gu(void) {
 int main(void) {
     char donor_report[128];
     dspsp_runtime_init();
+    ds_imports_init();
     dspsp_log("Dead Space PSP bootstrap starting");
 
     int cpu_test = ds_armv6_selftest();
