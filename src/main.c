@@ -5,6 +5,7 @@
 #include "runtime/donor_elf.h"
 #include "runtime/runtime.h"
 #include "runtime/log.h"
+#include "runtime/arm_elf.h"
 #include "cpu/armv6.h"
 
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
@@ -36,6 +37,10 @@ int main(void) {
 
     int cpu_test = ds_armv6_selftest();
     dspsp_log("ARMv6 interpreter self-test=%d", cpu_test);
+
+    DsArmElfInfo elf_info;
+    int elf_probe = ds_arm_elf_probe("ms0:/data/deadspace/guest_libs/libDeadSpace.so", &elf_info);
+    dspsp_log("ARM ELF probe=%d entry=0x%08X base=0x%08X size=%u segments=%u", elf_probe, elf_info.entry, elf_info.image_base, elf_info.image_size, elf_info.load_segments);
 
     int elf_status = dspsp_inspect_donor(
         "ms0:/data/deadspace/guest_libs/libDeadSpace.so",
