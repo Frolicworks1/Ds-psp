@@ -265,7 +265,8 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         uint32_t mem_off;
         if (addr < image->load_addr) return -3;
         mem_off = addr - image->load_addr;
-        if (mem_off >= image->size || image->size - mem_off < (byte ? 1u : 4u)) return -3;
+        uint32_t total_size=image->size + image->heap_size;
+        if (mem_off >= total_size || total_size - mem_off < (byte ? 1u : 4u)) return -3;
         if (load) {
             if (byte) value = image->base[mem_off];
             else memcpy(&value, image->base + mem_off, 4);
