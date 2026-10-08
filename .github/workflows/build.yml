@@ -1,0 +1,18 @@
+name: PSP build
+on:
+  push:
+    branches: [ main, psp-port-bootstrap ]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: pspdev/pspdev:latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build
+      - run: cmake --build build -j2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deadspace-psp-eboot
+          path: build/EBOOT.PBP
