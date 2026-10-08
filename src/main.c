@@ -6,7 +6,7 @@
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 static unsigned int __attribute__((aligned(16))) list[262144];
-static unsigned int __attribute__((aligned(16))) framebuf[480 * 272];
+static unsigned int __attribute__((aligned(16))) framebuf[512 * 272];
 static void init_gu(void) {
     sceGuInit();
     sceGuStart(GU_DIRECT, list);
