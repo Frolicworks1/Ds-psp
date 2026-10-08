@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APK="$1"
+APK="\${1:-}"
 if [ -z "$APK" ]; then
   APK="$(find /workspaces -maxdepth 4 -type f -iname '*.apk' -print -quit 2>/dev/null || true)"
 fi
