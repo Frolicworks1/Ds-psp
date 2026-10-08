@@ -17,7 +17,7 @@ void ds_arm_loader_unload(DsArmImage *image) {
 
 const uint8_t *ds_arm_loader_ptr(const DsArmImage *image, uint32_t vaddr) {
     if (!image || !image->image || vaddr < image->image_base ||
-        vaddr - image->image_base >= image->image_size) return 0;
+        vaddr - image->image_base >= image->image_size + image->heap_size) return 0;
     return image->image + (vaddr - image->image_base);
 }
 
@@ -56,11 +56,13 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
     }
 
     uint32_t size = hi - lo;
-    uint8_t *mem = (uint8_t *)malloc(size);
+    const uint32_t heap_size = 8u * 1024u * 1024u;
+    if (size > 0xffffffffu - heap_size) { sceIoClose(fd); return -6; }
+    uint8_t *mem = (uint8_t *)malloc(size + heap_size);
     if (!mem) {
         sceIoClose(fd); return -6;
     }
-    memset(mem, 0, size);
+    memset(mem, 0, size + heap_size);
 
     for (unsigned i = 0; i < eh.e_phnum; ++i) {
         Elf32_Phdr ph;
@@ -86,5 +88,8 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
     out->image_size = size;
     out->entry = eh.e_entry;
     out->load_segments = loads;
+    out->heap_base = lo + size;
+    out->heap_size = heap_size;
+    out->heap_used = 0;
     return 0;
 }
