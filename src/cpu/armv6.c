@@ -149,6 +149,29 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
     if ((insn & 0x0ffffff0u) == 0x012fff10u) {
         uint32_t target = cpu->r[insn & 0xfu];
         cpu->pc = target & ~1u;
+        cpu->thumb = target & 1u;
+        ++cpu->steps;
+        return 0;
+    }
+
+    /* ARM BL: save return address in LR, then branch. */
+    if ((insn & 0x0f000000u) == 0x0b000000u) {
+        int32_t off = (int32_t)(insn & 0x00ffffffu);
+        if (off & 0x00800000) off |= (int32_t)0xff000000u;
+        cpu->r[14] = cpu->pc + 4u;
+        cpu->pc = cpu->pc + 8u + ((uint32_t)off << 2);
+        ++cpu->steps;
+        return 0;
+    }
+
+    /* ARM BLX immediate (ARMv5T+ encoding). */
+    if ((insn & 0xfe000000u) == 0xfa000000u) {
+        int32_t off = (int32_t)(insn & 0x00ffffffu);
+        unsigned h = (insn >> 24) & 1u;
+        if (off & 0x00800000) off |= (int32_t)0xff000000u;
+        cpu->r[14] = cpu->pc + 4u;
+        cpu->pc = (cpu->pc + 8u + ((uint32_t)off << 2) + (h << 1)) & ~1u;
+        cpu->thumb = 1u;
         ++cpu->steps;
         return 0;
     }
