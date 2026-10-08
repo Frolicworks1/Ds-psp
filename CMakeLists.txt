@@ -18,6 +18,7 @@ add_executable(EBOOT.ELF
     src/runtime/log.c
     src/runtime/data.c
     src/runtime/runtime.c
+    src/cpu/armv6.c
 )
 
 target_compile_options(EBOOT.ELF PRIVATE -O2 -G0 -Wall -Wextra)
