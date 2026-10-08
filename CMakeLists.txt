@@ -18,6 +18,7 @@ add_executable(EBOOT.ELF
     src/runtime/log.c
     src/runtime/data.c
     src/runtime/runtime.c
+    src/runtime/arm_elf.c
     src/cpu/armv6.c
 )
 
