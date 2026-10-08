@@ -5,6 +5,7 @@
 #include "runtime/donor_elf.h"
 #include "runtime/runtime.h"
 #include "runtime/log.h"
+#include "cpu/armv6.h"
 
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
@@ -32,6 +33,9 @@ int main(void) {
     char donor_report[128];
     dspsp_runtime_init();
     dspsp_log("Dead Space PSP bootstrap starting");
+
+    int cpu_test = ds_armv6_selftest();
+    dspsp_log("ARMv6 interpreter self-test=%d", cpu_test);
 
     int elf_status = dspsp_inspect_donor(
         "ms0:/data/deadspace/guest_libs/libDeadSpace.so",
