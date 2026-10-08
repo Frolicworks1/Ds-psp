@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(deadspace_psp C)
 
 if(NOT DEFINED ENV{PSPDEV})
     message(FATAL_ERROR "PSPDEV is not set")
 endif()
 
 set(CMAKE_C_COMPILER "$ENV{PSPDEV}/bin/psp-gcc" CACHE FILEPATH "" FORCE)
+
+project(deadspace_psp C)
 
 add_executable(EBOOT.ELF
     src/main.c
