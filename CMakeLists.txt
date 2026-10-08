@@ -22,7 +22,7 @@ add_executable(EBOOT.ELF
 
 target_compile_options(EBOOT.ELF PRIVATE -O2 -G0 -Wall -Wextra)
 target_link_options(EBOOT.ELF PRIVATE -G0)
-target_link_libraries(EBOOT.ELF pspgu pspge pspdisplay pspctrl pspiofilemgr pspkernel)
+target_link_libraries(EBOOT.ELF pspgu pspge pspdisplay pspctrl pspkernel)
 
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/PARAM.SFO"
