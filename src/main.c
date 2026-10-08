@@ -3,10 +3,15 @@
 #include <pspgu.h>
 #include <pspctrl.h>
 #include "runtime/donor_elf.h"
+#include "runtime/runtime.h"
+#include "runtime/log.h"
+
 PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
+
 static unsigned int __attribute__((aligned(16))) list[262144];
 static unsigned int __attribute__((aligned(16))) framebuf[512 * 272];
+
 static void init_gu(void) {
     sceGuInit();
     sceGuStart(GU_DIRECT, list);
@@ -22,17 +27,29 @@ static void init_gu(void) {
     sceDisplayWaitVblankStart();
     sceGuDisplay(GU_TRUE);
 }
+
 int main(void) {
     char donor_report[128];
-    dspsp_inspect_donor("ms0:/data/deadspace/lib/armeabi/libEAMGameDeadSpace.so", donor_report, sizeof(donor_report));
+    dspsp_runtime_init();
+    dspsp_log("Dead Space PSP bootstrap starting");
+
+    int elf_status = dspsp_inspect_donor(
+        "ms0:/data/deadspace/guest_libs/libDeadSpace.so",
+        donor_report, sizeof(donor_report));
+    dspsp_log("donor status=%d report=%s", elf_status, donor_report);
+
     init_gu();
+    dspsp_log("GU initialized; waiting for HOME");
+
     SceCtrlData pad;
     while (1) {
         sceCtrlPeekBufferPositive(&pad, 1);
         if (pad.Buttons & PSP_CTRL_HOME) break;
         sceDisplayWaitVblankStart();
     }
+
     sceGuTerm();
+    dspsp_runtime_shutdown();
     sceKernelExitGame();
     return 0;
 }
