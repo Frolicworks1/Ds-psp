@@ -9,6 +9,9 @@ typedef struct {
     uint32_t image_size;
     uint32_t entry;
     uint32_t load_segments;
+    uint32_t heap_base;
+    uint32_t heap_size;
+    uint32_t heap_used;
 } DsArmImage;
 
 int ds_arm_loader_load(const char *path, DsArmImage *out);
