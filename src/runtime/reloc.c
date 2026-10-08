@@ -1,4 +1,5 @@
 #include "reloc.h"
+#include "imports.h"
 #include <pspiofilemgr.h>
 #include <elf.h>
 #include <string.h>
@@ -25,6 +26,7 @@ static uint32_t resolve_sym(const DsArmImage *im, uint32_t sym_value) {
  * layer rather than guessing libc/GLES/JNI addresses.
  */
 int ds_arm_apply_relocations(const char *path, DsArmImage *image) {
+    ds_imports_init();
     if (!path || !image || !image->image) return -1;
 
     SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
@@ -72,6 +74,7 @@ int ds_arm_apply_relocations(const char *path, DsArmImage *image) {
             sceIoClose(fd); return -7;
         }
         uint32_t type=ELF32_R_TYPE(rel.r_info);
+        uint32_t sym_index=ELF32_R_SYM(rel.r_info);
         uint32_t *where=ptr32(image, rel.r_offset);
         if (!where) { sceIoClose(fd); return -8; }
 
@@ -86,6 +89,10 @@ int ds_arm_apply_relocations(const char *path, DsArmImage *image) {
             if (*where >= image->image_base &&
                 *where < image->image_base + image->image_size)
                 *where = resolve_sym(image, *where);
+        } else if (type == R_ARM_JUMP_SLOT || type == R_ARM_GLOB_DAT) {
+            /* External symbol lookup is intentionally deferred until the dynamic
+             * symbol/string tables are parsed; never write a guessed address. */
+            (void)sym_index;
         } else if (type == R_ARM_NONE) {
             continue;
         }
