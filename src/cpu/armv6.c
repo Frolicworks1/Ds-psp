@@ -1,5 +1,6 @@
 #include "armv6.h"
 #include <string.h>
+#include "../runtime/imports.h"
 
 #define N_FLAG 0x80000000u
 #define Z_FLAG 0x40000000u
@@ -110,10 +111,19 @@ static int thumb_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         cpu->cpsr=(cpu->cpsr&~(N_FLAG|Z_FLAG))|(cpu->r[rd]&0x80000000u)|(cpu->r[rd]?0:Z_FLAG);
         cpu->pc=next; ++cpu->steps; return 0;
     }
-    /* BX/BLX register */
+    /* BX/BLX register.  Imported symbols use guest trampoline addresses. */
     if ((hw & 0xff87u)==0x4700u) {
-        unsigned rm=(hw>>3)&0xfu; target=cpu->r[rm];
-        cpu->pc=target&~1u; cpu->thumb=target&1u; ++cpu->steps; return 0;
+        unsigned rm=(hw>>3)&0xfu;
+        int blx=(hw & 0x0080u)!=0;
+        target=cpu->r[rm];
+        if (blx) cpu->r[14]=next|1u;
+        if (ds_import_is_trampoline(target)) {
+            int rc=ds_import_call(target,cpu);
+            if (rc) return -30;
+        } else {
+            cpu->pc=target&~1u; cpu->thumb=target&1u;
+        }
+        ++cpu->steps; return 0;
     }
     /* Conditional branch */
     if ((hw&0xf000u)==0xd000u && ((hw>>8)&0xfu)!=0xfu) {
@@ -146,10 +156,18 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         return 0;
     }
 
-    if ((insn & 0x0ffffff0u) == 0x012fff10u) {
+    if ((insn & 0x0ffffff0u) == 0x012fff10u ||
+        (insn & 0x0ffffff0u) == 0x012fff30u) {
         uint32_t target = cpu->r[insn & 0xfu];
-        cpu->pc = target & ~1u;
-        cpu->thumb = target & 1u;
+        int blx = ((insn & 0x0ffffff0u) == 0x012fff30u);
+        if (blx) cpu->r[14] = cpu->pc + 4u;
+        if (ds_import_is_trampoline(target)) {
+            int rc=ds_import_call(target,cpu);
+            if (rc) return -30;
+        } else {
+            cpu->pc = target & ~1u;
+            cpu->thumb = target & 1u;
+        }
         ++cpu->steps;
         return 0;
     }
