@@ -11,7 +11,7 @@ typedef struct {
 } DsArmv6Cpu;
 
 typedef struct {
-    const uint8_t *base;
+    uint8_t *base;
     uint32_t size;
     uint32_t load_addr;
 } DsArmv6Image;
