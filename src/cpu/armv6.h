@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-typedef struct {
+typedef struct DsArmv6Cpu {
     uint32_t r[16];
     uint32_t cpsr;
     uint32_t pc;
@@ -13,6 +13,7 @@ typedef struct {
 
 typedef struct {
     uint8_t *base;
+    /* Total mapped bytes, including any guest heap/stack. */
     uint32_t size;
     uint32_t load_addr;
 } DsArmv6Image;

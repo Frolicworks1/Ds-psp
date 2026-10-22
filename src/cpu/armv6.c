@@ -8,8 +8,24 @@
 #define V_FLAG 0x10000000u
 
 static uint32_t ror32(uint32_t v, unsigned n) {
+    n &= 31u;
     if (!n) return v;
     return (v >> n) | (v << (32u - n));
+}
+
+static void set_nz(DsArmv6Cpu *cpu, uint32_t result) {
+    cpu->cpsr = (cpu->cpsr & ~(N_FLAG | Z_FLAG)) |
+                (result & N_FLAG) | (result == 0 ? Z_FLAG : 0);
+}
+
+/* ARM AddWithCarry, also used for subtraction via a + ~b + 1. */
+static uint32_t add_with_carry(uint32_t a, uint32_t b, unsigned c,
+                               unsigned *carry, unsigned *overflow) {
+    uint64_t sum = (uint64_t)a + b + c;
+    uint32_t result = (uint32_t)sum;
+    *carry = (unsigned)(sum >> 32);
+    *overflow = ((~(a ^ b) & (a ^ result)) >> 31) & 1u;
+    return result;
 }
 
 static int cond_ok(uint32_t cpsr, unsigned cond) {
@@ -40,7 +56,7 @@ static int cond_ok(uint32_t cpsr, unsigned cond) {
 
 static int image_read32(const DsArmv6Image *image, uint32_t addr, uint32_t *out) {
     uint32_t off;
-    if (!image || !out || addr < image->load_addr) return -1;
+    if (!image || !image->base || !out || addr < image->load_addr) return -1;
     off = addr - image->load_addr;
     if (off > image->size || image->size - off < 4) return -1;
     memcpy(out, image->base + off, 4);
@@ -56,23 +72,29 @@ static uint32_t operand2(DsArmv6Cpu *cpu, uint32_t insn, unsigned *carry) {
     if (shift_reg) {
         unsigned rs = (insn >> 8) & 0xfu;
         shift_imm = cpu->r[rs] & 0xffu;
+        if (!shift_imm) return rm;
     }
 
     if (type == 0) {
         if (!shift_imm) return rm;
+        if (shift_imm >= 32) {
+            *carry = shift_imm == 32 ? rm & 1u : 0;
+            return 0;
+        }
         *carry = (rm >> (32u - shift_imm)) & 1u;
         return rm << shift_imm;
     }
     if (type == 1) {
-        if (!shift_imm) {
-            *carry = (rm >> 31) & 1u;
+        if (!shift_imm) shift_imm = 32;
+        if (shift_imm >= 32) {
+            *carry = shift_imm == 32 ? rm >> 31 : 0;
             return 0;
         }
         *carry = (rm >> (shift_imm - 1u)) & 1u;
         return rm >> shift_imm;
     }
     if (type == 2) {
-        if (!shift_imm) {
+        if (!shift_imm || shift_imm >= 32) {
             *carry = (rm >> 31) & 1u;
             return (rm & 0x80000000u) ? 0xffffffffu : 0u;
         }
@@ -82,9 +104,9 @@ static uint32_t operand2(DsArmv6Cpu *cpu, uint32_t insn, unsigned *carry) {
 
     if (!shift_imm) {
         *carry = rm & 1u;
-        return (cpu->cpsr & C_FLAG) ? 0x80000000u : 0u;
+        return ((cpu->cpsr & C_FLAG) ? 0x80000000u : 0u) | (rm >> 1);
     }
-    *carry = (rm >> (shift_imm - 1u)) & 1u;
+    *carry = (rm >> ((shift_imm - 1u) & 31u)) & 1u;
     return ror32(rm, shift_imm);
 }
 
@@ -95,24 +117,29 @@ void ds_armv6_reset(DsArmv6Cpu *cpu, uint32_t entry) {
 }
 
 static int thumb_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
-    uint32_t off, hw, next, target;
-    if (!cpu || !image || cpu->pc < image->load_addr) return -1;
+    uint32_t off, next, target;
+    uint16_t hw;
+    if (!cpu || !image || !image->base || cpu->pc < image->load_addr) return -1;
     off=cpu->pc-image->load_addr;
     if (off > image->size || image->size-off < 2) return -1;
     memcpy(&hw,image->base+off,2);
     next=cpu->pc+2;
+    cpu->r[15]=cpu->pc+4;
     /* MOVS/ADDS/SUBS immediate */
     if ((hw & 0xe000u)==0x2000u) {
         unsigned rd=(hw>>8)&7u; uint32_t imm=hw&0xffu; unsigned op=(hw>>11)&3u;
-        if(op==0) cpu->r[rd]=imm;
-        else if(op==1) cpu->r[rd]+=imm;
-        else if(op==2) cpu->r[rd]-=imm;
-        else cpu->r[rd]=imm;
-        cpu->cpsr=(cpu->cpsr&~(N_FLAG|Z_FLAG))|(cpu->r[rd]&0x80000000u)|(cpu->r[rd]?0:Z_FLAG);
+        uint32_t result;
+        unsigned carry=0, overflow=0;
+        if(op==0) result=imm;
+        else if(op==2) result=add_with_carry(cpu->r[rd],imm,0,&carry,&overflow);
+        else result=add_with_carry(cpu->r[rd],~imm,1,&carry,&overflow);
+        if(op!=1) cpu->r[rd]=result; /* CMP only changes flags. */
+        set_nz(cpu,result);
+        if(op!=0) cpu->cpsr=(cpu->cpsr&~(C_FLAG|V_FLAG)) | (carry?C_FLAG:0) | (overflow?V_FLAG:0);
         cpu->pc=next; ++cpu->steps; return 0;
     }
     /* BX/BLX register.  Imported symbols use guest trampoline addresses. */
-    if ((hw & 0xff87u)==0x4700u) {
+    if ((hw & 0xff07u)==0x4700u) {
         unsigned rm=(hw>>3)&0xfu;
         int blx=(hw & 0x0080u)!=0;
         target=cpu->r[rm];
@@ -126,15 +153,15 @@ static int thumb_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         ++cpu->steps; return 0;
     }
     /* Conditional branch */
-    if ((hw&0xf000u)==0xd000u && ((hw>>8)&0xfu)!=0xfu) {
+    if ((hw&0xf000u)==0xd000u && ((hw>>8)&0xfu)<0xeu) {
         unsigned cond=(hw>>8)&0xfu; int8_t imm=(int8_t)(hw&0xffu);
-        if(cond_ok(cpu->cpsr,cond)) cpu->pc=next+((int32_t)imm<<1); else cpu->pc=next;
+        if(cond_ok(cpu->cpsr,cond)) cpu->pc=cpu->pc+4u+(uint32_t)((int32_t)imm*2); else cpu->pc=next;
         ++cpu->steps; return 0;
     }
     /* Unconditional branch */
     if ((hw&0xf800u)==0xe000u) {
         int32_t imm=(int32_t)(hw&0x7ffu); if(imm&0x400) imm|=~0x7ff;
-        cpu->pc=next+(imm<<1); ++cpu->steps; return 0;
+        cpu->pc=cpu->pc+4u+(uint32_t)(imm*2); ++cpu->steps; return 0;
     }
     return -20;
 }
@@ -142,15 +169,18 @@ static int thumb_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
 int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
     if (cpu && cpu->thumb) return thumb_step(cpu,image);
     uint32_t insn, op1, op2, result;
-    unsigned cond, rn, rd, carry = (cpu->cpsr & C_FLAG) != 0;
+    unsigned cond, rn, rd, carry, overflow = 0;
     uint32_t next_pc;
 
     if (!cpu || !image || image_read32(image, cpu->pc, &insn) < 0) return -1;
+    carry = (cpu->cpsr & C_FLAG) != 0;
     next_pc = cpu->pc + 4u;
     cond = insn >> 28;
     cpu->r[15] = cpu->pc + 8u;
 
-    if (!cond_ok(cpu->cpsr, cond)) {
+    /* BLX immediate has cond=0xf and must bypass ordinary condition tests. */
+    if (cond == 0xfu && (insn & 0xfe000000u) != 0xfa000000u) return -2;
+    if (cond != 0xfu && !cond_ok(cpu->cpsr, cond)) {
         cpu->pc = next_pc;
         ++cpu->steps;
         return 0;
@@ -173,7 +203,7 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
     }
 
     /* ARM BL: save return address in LR, then branch. */
-    if ((insn & 0x0f000000u) == 0x0b000000u) {
+    if (cond != 0xfu && (insn & 0x0f000000u) == 0x0b000000u) {
         int32_t off = (int32_t)(insn & 0x00ffffffu);
         if (off & 0x00800000) off |= (int32_t)0xff000000u;
         cpu->r[14] = cpu->pc + 4u;
@@ -218,7 +248,7 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         for (unsigned i=0;i<16;++i) if (list&(1u<<i)) {
             if (addr < image->load_addr) return -3;
             uint32_t mo=addr-image->load_addr;
-            if (mo>image->size+image->heap_size || image->size+image->heap_size-mo<4) return -3;
+            if (mo>image->size || image->size-mo<4) return -3;
             if (load) {
                 uint32_t v; memcpy(&v,image->base+mo,4);
                 if (i==15u) { cpu->pc=v&~1u; cpu->thumb=v&1u; }
@@ -246,15 +276,10 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         unsigned load = (insn >> 20) & 1u;
         uint32_t off;
         if (insn & 0x02000000u) {
-            unsigned rm = insn & 0xfu;
-            off = cpu->r[rm];
-            unsigned st = (insn >> 5) & 3u;
-            unsigned sh = (insn >> 7) & 0x1fu;
-            if (st == 0) off = sh ? off << sh : off;
-            else if (st == 1) off = sh ? off >> sh : 0;
-            else if (st == 2) off = sh ? (uint32_t)((int32_t)off >> sh)
-                                      : ((off & 0x80000000u) ? 0xffffffffu : 0);
-            else off = sh ? ror32(off, sh) : ((cpu->cpsr & C_FLAG) ? 0x80000000u : 0);
+            /* Addressing mode 2 permits immediate shifts, not register shifts. */
+            if (insn & 0x10u) return -2;
+            unsigned ignored_carry = carry;
+            off = operand2(cpu, insn, &ignored_carry);
         } else {
             off = insn & 0xfffu;
         }
@@ -265,12 +290,15 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         uint32_t mem_off;
         if (addr < image->load_addr) return -3;
         mem_off = addr - image->load_addr;
-        uint32_t total_size=image->size + image->heap_size;
+        uint32_t total_size=image->size;
         if (mem_off >= total_size || total_size - mem_off < (byte ? 1u : 4u)) return -3;
         if (load) {
             if (byte) value = image->base[mem_off];
             else memcpy(&value, image->base + mem_off, 4);
-            if (rd2 == 15u) cpu->pc = value & ~1u;
+            if (rd2 == 15u) {
+                cpu->pc = value & ~1u;
+                cpu->thumb = value & 1u;
+            }
             else cpu->r[rd2] = value;
         } else {
             value = (rd2 == 15u) ? cpu->pc + 8u : cpu->r[rd2];
@@ -307,9 +335,15 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
     if ((insn & 0x0f000000u) == 0x0f000000u) return -4;
 
     if ((insn & 0x0c000000u) != 0) return -2;
+    /* Do not reinterpret halfword transfers or PSR operations as arithmetic. */
+    if ((insn & 0x90u) == 0x90u) return -2;
+    unsigned opcode = (insn >> 21) & 0xfu;
+    int flags_only = opcode >= 8u && opcode <= 11u;
+    if (flags_only && !(insn & 0x00100000u)) return -2;
 
     rn = (insn >> 16) & 0xfu;
     rd = (insn >> 12) & 0xfu;
+    if (!flags_only && rd == 15u && (insn & 0x00100000u)) return -2;
     op1 = cpu->r[rn];
 
     if (insn & 0x02000000u) {
@@ -320,19 +354,21 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         op2 = operand2(cpu, insn, &carry);
     }
 
-    switch ((insn >> 21) & 0xfu) {
+    unsigned input_carry = (cpu->cpsr & C_FLAG) != 0;
+    int arithmetic = (opcode >= 2u && opcode <= 7u) || opcode == 10u || opcode == 11u;
+    switch (opcode) {
     case 0x0: result = op1 & op2; break;
     case 0x1: result = op1 ^ op2; break;
-    case 0x2: result = op1 - op2; break;
-    case 0x3: result = op2 - op1; break;
-    case 0x4: result = op1 + op2; break;
-    case 0x5: result = op1 + op2 + (cpu->cpsr & C_FLAG ? 1u : 0u); break;
-    case 0x6: result = op1 - op2 - (cpu->cpsr & C_FLAG ? 0u : 1u); break;
-    case 0x7: result = op2 - op1 - (cpu->cpsr & C_FLAG ? 0u : 1u); break;
+    case 0x2: result = add_with_carry(op1, ~op2, 1, &carry, &overflow); break;
+    case 0x3: result = add_with_carry(op2, ~op1, 1, &carry, &overflow); break;
+    case 0x4: result = add_with_carry(op1, op2, 0, &carry, &overflow); break;
+    case 0x5: result = add_with_carry(op1, op2, input_carry, &carry, &overflow); break;
+    case 0x6: result = add_with_carry(op1, ~op2, input_carry, &carry, &overflow); break;
+    case 0x7: result = add_with_carry(op2, ~op1, input_carry, &carry, &overflow); break;
     case 0x8: result = op1 & op2; break;
     case 0x9: result = op1 ^ op2; break;
-    case 0xa: result = op1 - op2; break;
-    case 0xb: result = op1 + op2; break;
+    case 0xa: result = add_with_carry(op1, ~op2, 1, &carry, &overflow); break;
+    case 0xb: result = add_with_carry(op1, op2, 0, &carry, &overflow); break;
     case 0xc: result = op1 | op2; break;
     case 0xd: result = op2; break;
     case 0xe: result = op1 & ~op2; break;
@@ -340,7 +376,9 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
     default: return -2;
     }
 
-    if (rd == 15u) {
+    if (flags_only) {
+        cpu->pc = next_pc;
+    } else if (rd == 15u) {
         cpu->pc = result & ~1u;
     } else {
         cpu->r[rd] = result;
@@ -348,10 +386,10 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
     }
 
     if (insn & 0x00100000u) {
-        cpu->cpsr &= ~(N_FLAG | Z_FLAG | C_FLAG);
-        if (result & 0x80000000u) cpu->cpsr |= N_FLAG;
-        if (result == 0) cpu->cpsr |= Z_FLAG;
+        set_nz(cpu, result);
+        cpu->cpsr &= ~C_FLAG;
         if (carry) cpu->cpsr |= C_FLAG;
+        if (arithmetic) cpu->cpsr = (cpu->cpsr & ~V_FLAG) | (overflow ? V_FLAG : 0);
     }
 
     ++cpu->steps;
@@ -375,7 +413,7 @@ int ds_armv6_selftest(void) {
         0x0a000000u  /* beq +0 */
     };
     DsArmv6Cpu cpu;
-    DsArmv6Image image;
+    DsArmv6Image image = {0};
     ds_armv6_reset(&cpu, 0x1000u);
     image.base = (uint8_t *)(uintptr_t)program;
     image.size = sizeof(program);
@@ -384,6 +422,6 @@ int ds_armv6_selftest(void) {
     if (ds_armv6_step(&cpu, &image) != 0 || cpu.r[0] != 7) return -1;
     if (ds_armv6_step(&cpu, &image) != 0 || cpu.r[1] != 12) return -2;
     if (ds_armv6_step(&cpu, &image) != 0 || !(cpu.cpsr & Z_FLAG)) return -3;
-    if (ds_armv6_step(&cpu, &image) != 0 || cpu.pc != 0x1008u) return -4;
+    if (ds_armv6_step(&cpu, &image) != 0 || cpu.pc != 0x1014u) return -4;
     return 0;
 }

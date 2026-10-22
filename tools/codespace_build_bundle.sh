@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APK="\${1:-}"
+APK="${1:-}"
 if [ -z "$APK" ]; then
   APK="$(find /workspaces -maxdepth 4 -type f -iname '*.apk' -print -quit 2>/dev/null || true)"
 fi
@@ -11,7 +11,7 @@ if [ -z "$APK" ] || [ ! -f "$APK" ]; then
   echo "ERROR: APK not found. Pass the path to your legally owned APK."
   exit 2
 fi
-if [ -z "$PSPDEV" ] || [ ! -x "$PSPDEV/bin/psp-gcc" ]; then
+if [ -z "${PSPDEV:-}" ] || [ ! -x "$PSPDEV/bin/psp-gcc" ]; then
   echo "ERROR: PSPDEV toolchain unavailable. Rebuild the Codespace."
   exit 3
 fi

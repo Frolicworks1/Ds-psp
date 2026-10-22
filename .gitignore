@@ -45,3 +45,8 @@ psp_data/
 # Local full game bundle generated from the user's APK
 DeadSpace-PSP-Bundle/
 *.zip
+
+# Python tooling and generated local bundles
+__pycache__/
+*.pyc
+DeadSpace-PSP-Ready/

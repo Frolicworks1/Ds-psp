@@ -8,6 +8,14 @@ The Vita project is a reference, not a directly reusable executable: the donor g
 Build a native PSP EBOOT.PBP and progressively implement the runtime needed by the user's legally obtained Xperia Play game data.
 
 ## Status
+
+See [the staged implementation plan](docs/PORT_PLAN.md) for acceptance gates,
+current validation and the exact 1.2.0 donor inspected. The foundation now builds
+with the PSP SDK and has host CPU regression tests. It does not run the game.
+
+Run `bash tools/validate.sh` with PSPDEV set to check host regressions and build
+an EBOOT; successful compilation is not a gameplay result.
+
 - PSP bootstrap: started
 - Native PSP entry point: added
 - GU initialization: added
