@@ -10,7 +10,7 @@ if(DSPSP_SANITIZE)
 endif()
 foreach(group selftest fetch_bounds flags_only arithmetic_flags carry_arithmetic
               register_shifts rrx arm_branches blx_immediate thumb_immediates
-              thumb_branches memory_bounds unsupported)
+              thumb_branches memory_bounds unsupported vfp_transfers)
     add_test(NAME armv6_${group} COMMAND test_armv6 ${group})
 endforeach()
 

@@ -193,9 +193,52 @@ static int unsupported(void) {
     return 0;
 }
 
+static int vfp_transfers(void) {
+    Fixture f; reset(&f,0xed2d8b06u,0); /* vpush {d8-d10} */
+    f.cpu.r[13]=0x1100;
+    for(unsigned i=0;i<32;++i) f.cpu.vfp[i]=0x12340000u+i;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[13]==0x10e8);
+    for(unsigned i=0;i<6;++i) CHECK(f.words[58+i]==0x12340010u+i);
+    f.words[1]=0xecbd8b06u; /* vpop {d8-d10} */
+    memset(f.cpu.vfp,0,sizeof(f.cpu.vfp));
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[13]==0x1100);
+    CHECK(f.cpu.vfp[16]==0x12340010 && f.cpu.vfp[21]==0x12340015);
+    reset(&f,0xedd10a01u,0); /* vldr s1,[r1,#4] */
+    f.cpu.r[1]=0x1080; f.words[33]=0x7fc01234;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.vfp[1]==0x7fc01234 && f.cpu.vfp[0]==0);
+    reset(&f,0xed910b02u,0); f.cpu.r[1]=0x1080; f.words[34]=0x89abcdef; f.words[35]=0x01234567;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.vfp[0]==0x89abcdef && f.cpu.vfp[1]==0x01234567);
+    f.words[1]=0xed010b02u; /* vstr d0,[r1,#-8] */
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.words[30]==0x89abcdef && f.words[31]==0x01234567);
+    reset(&f,0xed9f0a00u,0); f.words[2]=0x80000000;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.vfp[0]==0x80000000);
+    reset(&f,0xeca10a04u,0); f.cpu.r[1]=0x1080;
+    for(unsigned i=0;i<4;++i) f.cpu.vfp[i]=i+1;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[1]==0x1090 && f.words[35]==4);
+    f.words[1]=0xecb10a04u;f.cpu.r[1]=0x1080;memset(f.cpu.vfp,0,sizeof(f.cpu.vfp));
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[1]==0x1090 && f.cpu.vfp[3]==4);
+    /* Reject complete out-of-range transfers before any register/memory mutation. */
+    reset(&f,0xed2d8b06u,0);f.cpu.r[13]=0x1010;f.cpu.vfp[16]=42;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-3 && f.cpu.r[13]==0x1010 && f.words[0]==0xed2d8b06);
+    reset(&f,0xed910b02u,0);f.cpu.r[1]=0x10f4;f.cpu.vfp[0]=42;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-3 && f.cpu.vfp[0]==42);
+    reset(&f,0xed910b02u,0);f.cpu.r[1]=0xfffffffcu;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-3);
+    reset(&f,0xedd10a01u,0);f.cpu.r[1]=0x1081;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-3);
+    const uint32_t bad[]={0xed6d0b02u,0xed2d8b03u,0xecb1fa04u,0xecb10a00u,0xee300a00u};
+    for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+        reset(&f,bad[i],0);f.cpu.r[1]=0x1080;f.cpu.r[13]=0x1100;
+        CHECK(ds_armv6_step(&f.cpu,&f.image)==-2 && f.cpu.pc==0x1000 && f.cpu.steps==0);
+    }
+    reset(&f,0x0d2d8b06u,0);f.cpu.r[13]=0; /* failed EQ skips transfer */
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[13]==0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const struct { const char *name; int (*run)(void); } tests[] = {
-        {"selftest",selftest},{"fetch_bounds",fetch_bounds},{"flags_only",flags_only},
+        {"vfp_transfers",vfp_transfers},{"selftest",selftest},{"fetch_bounds",fetch_bounds},{"flags_only",flags_only},
         {"arithmetic_flags",arithmetic_flags},{"carry_arithmetic",carry_arithmetic},
         {"register_shifts",register_shifts},{"rrx",rrx},{"arm_branches",arm_branches},
         {"blx_immediate",blx_immediate},{"thumb_immediates",thumb_immediates},

@@ -91,9 +91,9 @@ first-constructor probe returns to its sentinel after 1,640 successful steps,
 including cleanup registration. Its two mappings (16,781,312 and 16,777,216 bytes)
 still fail ENOMEM. Returning from this routine does not establish a usable heap,
 successful game initialization or correctness of all interpreter instructions.
-The persistent sequence now returns from constructors 0–25 and stops in
-constructor 26 on unsupported VFP opcode 0xed2d8b06 at PC 0x000f956c. The
-remaining 181 entries and JNI startup are untested. An explicit host
+The persistent sequence now returns from constructors 0–36 and stops in
+constructor 37 on unsupported STRH opcode 0xe1c021b4 at PC 0x001b58f0. The
+remaining 170 entries and JNI startup are untested. An explicit host
 experiment with an 18 MiB mapping pool now services the large allocation and
 returns after 1,584 steps; see the budget measurements below.
 
@@ -191,8 +191,8 @@ execution and are not counted as errno-return failures. Partial unmapping and
 repeated unmapping of holes do not underflow live-byte accounting. Counters reset
 on initialization or binding a different image.
 
-The persistent sequence has now reached constructor 26 without further mapping
-requests. Next: implement independently tested VFP execution and continue the
+The persistent sequence has now reached constructor 37 without further mapping
+requests. Next: implement independently tested halfword transfers and continue the
 sequence before reducing reservations or sharing unused capacity. Do not infer that unused space at this one
 checkpoint stays unused during gameplay. The supplied GTA PBP's MEMSIZE=1 and
 pool/streaming strings are reference clues only; no matching source was verified,
@@ -220,9 +220,27 @@ each routine checks a counter written by its predecessor before updating it.
 Other fixtures test sentinel entries, invalid metadata/targets, failure stopping
 and the exact instruction-limit boundary. Python 3 is required for this host test.
 
-Exact donor result with an 18 MiB mapping pool: 208 total entries, 27 attempted,
-26 returned, zero skipped, 181 pending; 1,835 successful steps. Constructor index
-26 starts at 0x000f9568 and stops at 0x000f956c (opcode 0xed2d8b06, VFP register
-stack transfer). Live/peak mapped bytes remain 16,781,312, bridge use 1,616,
-program-break use zero, total mapped image+arena 30,285,824. No allocation failures
-occurred. These are partial-initialization measurements, not final memory bounds.
+Exact donor result with an 18 MiB mapping pool after VFP transfer support:
+208 total entries, 38 attempted, 37 returned, zero skipped, 170 pending;
+2,567 successful steps. Constructor index 37 starts at 0x001b5a98 and stops at
+0x001b58f0 (opcode 0xe1c021b4, STRH r2,[r0,#20]). Live/peak mapped bytes remain
+16,781,312, bridge use 1,616, program-break use zero, total mapped image+arena
+30,285,824. No allocation failures occurred. These remain partial measurements.
+
+## VFPv2 register and memory transfers
+
+The CPU now stores raw S0–S31 words; D0–D15 alias adjacent words (low word first).
+VLDR/VSTR and VLDM/VSTM support single/double transfers, PC-relative literals,
+increment-after and decrement-before addressing, including VPUSH/VPOP. Complete
+ranges, register counts, alignment and writeback addresses are checked before
+mutating memory/registers. Condition-failed instructions remain no-ops. Invalid
+lists, D16–D31 and unsupported arithmetic still stop explicitly. This is not full
+VFP emulation; no floating-point arithmetic or FPSCR semantics are implemented.
+
+The host regression group tests bit-exact transfers (including NaN payloads and
+signed zero), aliasing, stack restoration, writeback, conditions and fault atomicity.
+`tools/check_vfp_oracle.py` additionally compares 266 deterministic valid vectors
+against Unicorn 2.1.4, checking all VFP registers, core registers, PC and memory.
+It is optional (requires Unicorn and a host C compiler); normal CI tests require
+neither Unicorn nor donor files. Capstone 5.0.7 independently identified the donor
+VPUSH and current STRH boundary. No host float approximation was introduced.

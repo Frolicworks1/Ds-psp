@@ -63,6 +63,41 @@ static int image_read32(const DsArmv6Image *image, uint32_t addr, uint32_t *out)
     return 0;
 }
 
+/* VFPv2 register transfers only. Arithmetic and newer register banks remain
+ * explicit unsupported instructions. Validate the whole transfer before writes. */
+static int vfp_memory(DsArmv6Cpu *cpu, const DsArmv6Image *image, uint32_t insn) {
+    unsigned p=(insn>>24)&1, u=(insn>>23)&1, d=(insn>>22)&1;
+    unsigned w=(insn>>21)&1, load=(insn>>20)&1, rn=(insn>>16)&15;
+    unsigned vd=(insn>>12)&15, dbl=(insn>>8)&1, count=insn&255;
+    unsigned first=dbl ? vd*2 : vd*2+d;
+    if (dbl && d) return -2; /* D16-D31 require VFPv3. */
+    uint32_t base=rn==15 ? (cpu->pc+8u)&~3u : cpu->r[rn];
+    uint64_t addr=base, bytes=(uint64_t)count*4, updated=base;
+    if (p && !w) { /* VLDR / VSTR immediate offset */
+        if (rn==15 && !load) return -2;
+        if (!u && bytes>base) return -3;
+        addr=u ? (uint64_t)base+bytes : base-bytes;
+        count=dbl?2:1;
+        bytes=count*4;
+    } else { /* VLDM/VSTM increment-after, or decrement-before with writeback */
+        if (rn==15 || (!p && !u) || (p && (u || !w)) ||
+            !count || (dbl && (count&1)) || first+count>32) return -2;
+        if (!u && bytes>base) return -3;
+        updated=u ? (uint64_t)base+bytes : base-bytes;
+        addr=p?updated:base;
+    }
+    if (!image || !image->base || (addr&3) || addr<image->load_addr ||
+        addr>UINT32_MAX || updated>UINT32_MAX ||
+        addr-image->load_addr>image->size || bytes>image->size-(addr-image->load_addr)) return -3;
+    uint8_t *memory=image->base+(uint32_t)(addr-image->load_addr);
+    if (load) memcpy(cpu->vfp+first,memory,(size_t)bytes);
+    else memcpy(memory,cpu->vfp+first,(size_t)bytes);
+    if (w) cpu->r[rn]=(uint32_t)updated;
+    cpu->pc+=4;
+    ++cpu->steps;
+    return 0;
+}
+
 static uint32_t operand2(DsArmv6Cpu *cpu, uint32_t insn, unsigned *carry) {
     uint32_t rm = cpu->r[insn & 0xfu];
     unsigned type = (insn >> 5) & 3u;
@@ -191,6 +226,9 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         ++cpu->steps;
         return 0;
     }
+
+    if ((insn & 0x0e000e00u) == 0x0c000a00u)
+        return vfp_memory(cpu, image, insn);
 
     if ((insn & 0x0ffffff0u) == 0x012fff10u ||
         (insn & 0x0ffffff0u) == 0x012fff30u) {

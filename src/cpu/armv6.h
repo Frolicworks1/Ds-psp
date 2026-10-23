@@ -9,6 +9,8 @@ typedef struct DsArmv6Cpu {
     uint32_t pc;
     uint32_t steps;
     uint32_t thumb;
+    /* VFPv2 S0-S31; Dn aliases S(2n), S(2n+1), low word first. */
+    uint32_t vfp[32];
 } DsArmv6Cpu;
 
 typedef struct {
