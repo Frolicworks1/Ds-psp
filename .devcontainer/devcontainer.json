@@ -1,0 +1,12 @@
+{
+  "name": "Dead Space PSP Port",
+  "image": "pspdev/pspdev:latest",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-python.python"
+      ]
+    }
+  }
+}

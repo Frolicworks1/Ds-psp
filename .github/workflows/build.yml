@@ -1,0 +1,34 @@
+name: PSP runtime checks
+on:
+  push:
+    branches: [main, psp-port-bootstrap, 'coderabbit/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-cpu-checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build CPU checks with sanitizers
+        run: |
+          cmake -S tests -B build-host -DDSPSP_SANITIZE=ON
+          cmake --build build-host -j2
+      - name: Test supported instruction semantics
+        run: ctest --test-dir build-host --output-on-failure
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: pspdev/pspdev@sha256:54895e6f5afb71b8f4f6915ee6d5023e1e087ca7afdf2dcb1d7a694a5233e45f
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build
+      - run: cmake --build build -j2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deadspace-psp-eboot
+          path: |
+            build/EBOOT.PBP
+            build/THIRD-PARTY-LICENSES.txt
+          if-no-files-found: error

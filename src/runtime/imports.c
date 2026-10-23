@@ -1,0 +1,937 @@
+#include "imports.h"
+#include "assets.h"
+#include "../cpu/armv6.h"
+#include "arm_loader.h"
+#include "log.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/time.h>
+#ifdef __psp__
+#include <pspthreadman.h>
+#endif
+
+#define DS_IMPORT_MAX 512
+
+static char g_names[DS_IMPORT_MAX][256];
+static unsigned g_count;
+static DsArmImage *g_image;
+static uint32_t g_ctype_objects[3];
+static uint32_t g_stdio;
+static uint32_t g_errno;
+static uint32_t g_jvm,g_jenv,g_jrefs;
+#define JNI_REF_MAX 64u
+enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY, JNI_OBJECT_ASSETS,
+       JNI_CLASS_INPUT_STREAM, JNI_CLASS_ASSETS, JNI_CLASS_ASSET_DESCRIPTOR, JNI_CLASS_STRING };
+#define JNI_STRING_MAX 16u
+#define JNI_STRING_OBJECT 300u
+static struct { uint32_t address; unsigned live; } g_strings[JNI_STRING_MAX];
+/* IDs are table indices; keep the first four bootstrap IDs stable. */
+static const struct { unsigned object,slot; const char *name,*signature; } jni_methods[]={
+    {JNI_CLASS_EAIO,113,"Startup","(Landroid/content/res/AssetManager;)V"},
+    {JNI_CLASS_EAIO,113,"Shutdown","()V"},
+    {JNI_CLASS_ACTIVITY,113,"GetInstance","()Lcom/ea/blast/MainActivity;"},
+    {JNI_CLASS_ACTIVITY,33,"getAssets","()Landroid/content/res/AssetManager;"},
+    {JNI_CLASS_INPUT_STREAM,33,"read","([BII)I"},
+    {JNI_CLASS_INPUT_STREAM,33,"skip","(J)J"},
+    {JNI_CLASS_INPUT_STREAM,33,"close","()V"},
+    {JNI_CLASS_ASSETS,33,"open","(Ljava/lang/String;)Ljava/io/InputStream;"},
+    {JNI_CLASS_ASSETS,33,"openFd","(Ljava/lang/String;)Landroid/content/res/AssetFileDescriptor;"},
+    {JNI_CLASS_ASSETS,33,"list","(Ljava/lang/String;)[Ljava/lang/String;"},
+    {JNI_CLASS_ASSET_DESCRIPTOR,33,"getLength","()J"}
+};
+#define JNI_METHOD_MAX (sizeof(jni_methods)/sizeof(jni_methods[0]))
+#define JNI_ARRAY_MAX 4u
+#define JNI_ARRAY_BYTES 65536u
+#define JNI_ARRAY_OBJECT 256u
+static struct { uint32_t address,length; unsigned live; } g_arrays[JNI_ARRAY_MAX];
+static DsAssets g_assets;
+static unsigned g_activity_started;
+static uint32_t g_eaio_startup;
+/* Object identity is distinct from the lifetime of each local/global handle. */
+static struct { unsigned object,global; } g_jref[JNI_REF_MAX];
+#define JNI_TRAMP_BASE 0xf1000000u
+#define JNI_ENV_SLOTS 233u
+#define JNI_VM_SLOTS 8u
+
+#define MMAP_PAGES (DS_ARM_MAX_MMAP_BYTES / 4096u)
+static uint8_t g_mapped[MMAP_PAGES];
+static DsGuestMemoryStats g_memory_stats;
+static uint32_t g_globals[3];
+#define DESTRUCTOR_MAX 1024u
+static DsGuestDestructor g_destructors[DESTRUCTOR_MAX];
+static unsigned g_destructor_count;
+
+static uint32_t trampoline_for(unsigned id) {
+    return DS_IMPORT_TRAMP_BASE + id * 4u;
+}
+
+void ds_imports_init(void) {
+    ds_assets_reset(&g_assets);
+    memset(g_arrays,0,sizeof(g_arrays));
+    memset(g_strings,0,sizeof(g_strings));
+    memset(g_names, 0, sizeof(g_names));
+    g_count = 0;
+    g_destructor_count = 0;
+    g_image = 0;
+    g_stdio = 0;
+    g_errno = 0;
+    g_jvm = g_jenv = g_jrefs = 0;
+    g_activity_started = 0;
+    g_eaio_startup = 0;
+    memset(g_jref,0,sizeof(g_jref));
+    memset(g_mapped, 0, sizeof(g_mapped));
+    memset(&g_memory_stats, 0, sizeof(g_memory_stats));
+    memset(g_globals, 0, sizeof(g_globals));
+    memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
+}
+
+void *ds_import_resolve(const char *library, const char *symbol) {
+    (void)library;
+    if (!symbol || !*symbol || strlen(symbol) >= sizeof(g_names[0])) return 0;
+
+    for (unsigned i = 0; i < g_count; ++i)
+        if (!strcmp(g_names[i], symbol))
+            return (void *)(uintptr_t)trampoline_for(i);
+
+    if (g_count >= DS_IMPORT_MAX) return 0;
+
+    strcpy(g_names[g_count], symbol);
+    ++g_count;
+    return (void *)(uintptr_t)trampoline_for(g_count - 1);
+}
+
+void ds_imports_bind_image(DsArmImage *image) {
+    if (g_image != image) {
+        ds_assets_reset(&g_assets);
+        memset(g_arrays,0,sizeof(g_arrays));
+        memset(g_strings,0,sizeof(g_strings));
+        g_destructor_count = 0;
+        memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
+        g_stdio = 0;
+        g_errno = 0;
+        g_jvm = g_jenv = g_jrefs = 0;
+        g_activity_started = 0;
+        g_eaio_startup = 0;
+        memset(g_jref,0,sizeof(g_jref));
+        memset(g_mapped, 0, sizeof(g_mapped));
+        memset(&g_memory_stats, 0, sizeof(g_memory_stats));
+        memset(g_globals, 0, sizeof(g_globals));
+    }
+    g_image = image;
+}
+
+static void *guest_range(uint32_t addr, uint32_t size) {
+    if (!g_image || addr < g_image->image_base) return 0;
+    uint32_t off = addr - g_image->image_base;
+    uint64_t total = (uint64_t)g_image->image_size + g_image->heap_size;
+    if (off > total || size > total - off) return 0;
+    return g_image->image + off;
+}
+
+static const char *guest_string(uint32_t addr) {
+    const char *p = guest_range(addr, 1);
+    if (!p) return 0;
+    size_t remaining = (size_t)g_image->image_size + g_image->heap_size -
+                       (addr - g_image->image_base);
+    return memchr(p, 0, remaining) ? p : 0;
+}
+
+static uint32_t guest_alloc(uint32_t size) {
+    if (!g_image || !size || size > UINT32_MAX - 7u) return 0;
+    uint32_t limit = g_image->bridge_size ? g_image->bridge_size : g_image->heap_size;
+    if (g_image->heap_used > limit) return 0;
+    size = (size + 7u) & ~7u;
+    if (size > limit - g_image->heap_used) return 0;
+    uint32_t p = g_image->heap_base + g_image->heap_used;
+    if (p < g_image->heap_base || size > UINT32_MAX - p || !guest_range(p, size)) return 0;
+    g_image->heap_used += size;
+    return p;
+}
+
+static void store32(uint8_t *p, uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (8 * i));
+}
+
+static uint32_t load32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
+           (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env) {
+    if (!vm || !env || !g_image) return -1;
+    *vm=*env=0;
+    if (!g_jvm) {
+        unsigned table_bytes=(2+JNI_VM_SLOTS+JNI_ENV_SLOTS)*4;
+        unsigned bytes=table_bytes+(JNI_REF_MAX+JNI_METHOD_MAX)*4;
+        uint32_t addr=guest_alloc(bytes);
+        if (!addr) return -1;
+        uint8_t *p=guest_range(addr,bytes); memset(p,0,bytes);
+        store32(p,addr+8); store32(p+4,addr+8+JNI_VM_SLOTS*4);
+        for (unsigned i=3;i<JNI_VM_SLOTS;++i) store32(p+8+i*4,JNI_TRAMP_BASE+i*4);
+        for (unsigned i=4;i<JNI_ENV_SLOTS;++i)
+            store32(p+8+(JNI_VM_SLOTS+i)*4,JNI_TRAMP_BASE+(JNI_VM_SLOTS+i)*4);
+        g_jvm=addr;g_jenv=addr+4;g_jrefs=addr+table_bytes;
+    }
+    *vm=g_jvm;*env=g_jenv; return 0;
+}
+
+static int jni_ref_index(uint32_t handle) {
+    if (!g_jrefs || handle<g_jrefs || handle-g_jrefs>=JNI_REF_MAX*4 || (handle&3)) return -1;
+    unsigned index=(handle-g_jrefs)/4;
+    return g_jref[index].object ? (int)index : -1;
+}
+static int jni_new_ref(unsigned object,unsigned global,uint32_t *out) {
+    for (unsigned i=0;i<JNI_REF_MAX;++i) if (!g_jref[i].object) {
+        g_jref[i].object=object;g_jref[i].global=global;
+        *out=g_jrefs+i*4;return 0;
+    }
+    /* Throwing OutOfMemoryError is not implemented; stop rather than invent it. */
+    return -32;
+}
+
+/* Platform equivalent of assigning MainActivity.instance before NativeOnCreate.
+ * One activity per bound image; this does not run Android UI initialization. */
+int ds_imports_start_activity(uint32_t *activity) {
+    if (!activity) return -31;
+    *activity=0;
+    if (!g_jenv || g_activity_started) return -31;
+    int rc=jni_new_ref(JNI_OBJECT_ACTIVITY,0,activity);
+    if (!rc) g_activity_started=1;
+    return rc;
+}
+
+int ds_imports_mount_assets(const char *root) {
+    if (!g_jenv) return -1;
+    return ds_assets_mount(&g_assets,root);
+}
+
+int ds_imports_bind_eaio_startup(uint32_t target) {
+    uint32_t address=target&~1u;
+    unsigned width=(target&1)?2u:4u;
+    if (!g_jenv || !target || (!(target&1) && (target&3)) ||
+        address<g_image->image_base ||
+        address-g_image->image_base>g_image->image_size ||
+        width>g_image->image_size-(address-g_image->image_base)) return -31;
+    g_eaio_startup=target;
+    return 0;
+}
+
+static int jni_trampoline(uint32_t addr) {
+    return g_jvm && addr>=JNI_TRAMP_BASE && addr<JNI_TRAMP_BASE+(JNI_VM_SLOTS+JNI_ENV_SLOTS)*4 && !(addr&3);
+}
+static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
+    unsigned slot=(addr-JNI_TRAMP_BASE)/4;
+    if (slot<JNI_VM_SLOTS) {
+        if (cpu->r[0]!=g_jvm) return -31;
+        if (slot==6) { /* JavaVM.GetEnv: this single guest thread is attached. */
+            uint8_t *out=guest_range(cpu->r[1],4);if (!out) return -31;
+            uint32_t version=cpu->r[2];
+            if (version!=0x10001 && version!=0x10002 && version!=0x10004 && version!=0x10006) {
+                store32(out,0);cpu->r[0]=(uint32_t)-3; /* JNI_EVERSION */
+            } else {store32(out,g_jenv);cpu->r[0]=0;}
+        } else { dspsp_log("unsupported JavaVM slot=%u",slot);return -32; }
+    } else {
+        slot-=JNI_VM_SLOTS;
+        if (cpu->r[0]!=g_jenv) return -31;
+        if (slot==4) cpu->r[0]=0x10006; /* GetVersion */
+        else if (slot==6) { /* FindClass: only verified, initialized metadata. */
+            const char *name=guest_string(cpu->r[1]);if (!name) return -31;
+            unsigned object;
+            if (!strcmp(name,"com/ea/EAIO/EAIO")) object=JNI_CLASS_EAIO;
+            else if (!strcmp(name,"com/ea/blast/MainActivity")) object=JNI_CLASS_ACTIVITY;
+            else if (!strcmp(name,"java/io/InputStream")) object=JNI_CLASS_INPUT_STREAM;
+            else if (!strcmp(name,"android/content/res/AssetManager")) object=JNI_CLASS_ASSETS;
+            else if (!strcmp(name,"android/content/res/AssetFileDescriptor")) object=JNI_CLASS_ASSET_DESCRIPTOR;
+            else if (!strcmp(name,"java/lang/String")) object=JNI_CLASS_STRING;
+            else {dspsp_log("unsupported JNI class: %s",name);return -32;}
+            /* EAIO has no <clinit>. MainActivity's only initializer sets
+             * activityExists=false, its default value. This creates class
+             * metadata, not an Activity instance or Android lifecycle. */
+            int rc=jni_new_ref(object,0,&cpu->r[0]);if (rc) return rc;
+        } else if (slot==113 || slot==33) { /* Static / instance method lookup */
+            int i=jni_ref_index(cpu->r[1]);
+            const char *name=guest_string(cpu->r[2]),*signature=guest_string(cpu->r[3]);
+            if(i<0 || !name || !signature)return -31;
+            unsigned method;
+            for (method=0;method<JNI_METHOD_MAX;++method)
+                if (jni_methods[method].object==g_jref[i].object &&
+                    jni_methods[method].slot==slot &&
+                    !strcmp(jni_methods[method].name,name) &&
+                    !strcmp(jni_methods[method].signature,signature)) break;
+            if (method==JNI_METHOD_MAX) {
+                dspsp_log("unsupported JNI method slot=%u: %s %s",slot,name,signature);return -32;
+            }
+            cpu->r[0]=g_jrefs+(JNI_REF_MAX+method)*4;
+        } else if (slot==31) { /* GetObjectClass for implemented platform objects */
+            int i=jni_ref_index(cpu->r[1]);if (i<0) return -31;
+            unsigned object;
+            if (g_jref[i].object==JNI_OBJECT_ACTIVITY) object=JNI_CLASS_ACTIVITY;
+            else if (g_jref[i].object==JNI_OBJECT_ASSETS) object=JNI_CLASS_ASSETS;
+            else if (g_jref[i].object>=JNI_STRING_OBJECT && g_jref[i].object<JNI_STRING_OBJECT+JNI_STRING_MAX) object=JNI_CLASS_STRING;
+            else return -32;
+            int rc=jni_new_ref(object,0,&cpu->r[0]);if (rc) return rc;
+        } else if (slot>=34 && slot<=36) { /* CallObjectMethod[/V/A]: getAssets() */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0) return -31;
+            if (g_jref[i].object!=JNI_OBJECT_ACTIVITY ||
+                cpu->r[2]!=g_jrefs+(JNI_REF_MAX+3)*4) return -32;
+            if (!g_assets.root[0]) {
+                dspsp_log("JNI getAssets requires a mounted extracted APK tree");return -32;
+            }
+            int rc=jni_new_ref(JNI_OBJECT_ASSETS,0,&cpu->r[0]);if (rc) return rc;
+        } else if (slot>=114 && slot<=116) { /* CallStaticObjectMethod[/V/A] */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0) return -31;
+            if (g_jref[i].object!=JNI_CLASS_ACTIVITY ||
+                cpu->r[2]!=g_jrefs+(JNI_REF_MAX+2)*4) return -32;
+            /* GetInstance has no parameters: do not dereference the va_list
+             * or jvalue pointer. Each non-null result is a new local ref. */
+            if (!g_activity_started) cpu->r[0]=0;
+            else {
+                int rc=jni_new_ref(JNI_OBJECT_ACTIVITY,0,&cpu->r[0]);
+                if (rc) return rc;
+            }
+        } else if (slot>=141 && slot<=143) { /* CallStaticVoidMethod[/V/A] */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0) return -31;
+            if (g_jref[i].object!=JNI_CLASS_EAIO ||
+                cpu->r[2]!=g_jrefs+JNI_REF_MAX*4 || !g_eaio_startup) return -32;
+            uint32_t manager=cpu->r[3];
+            if (slot!=141) {
+                /* ARM32 va_list points to words; jvalue occupies 8 bytes. */
+                const uint8_t *args=guest_range(manager,slot==142?4:8);
+                if (!args || (manager&3)) return -31;
+                manager=load32(args);
+            }
+            int object=jni_ref_index(manager);
+            if (object<0 || g_jref[object].object!=JNI_OBJECT_ASSETS) return -31;
+            /* Tail-dispatch into the real guest native function. Preserve LR,
+             * SP and callee-saved registers; its return resumes the JNI caller.
+             * No recursive interpreter or fabricated native success. */
+            cpu->r[2]=manager;
+            cpu->pc=g_eaio_startup&~1u;cpu->thumb=g_eaio_startup&1;
+            return 0;
+        } else if (slot==167) { /* NewStringUTF: copy into bounded guest-owned storage. */
+            const char *value=guest_string(cpu->r[1]);
+            if (!value) return -31;
+            unsigned index;
+            for (index=0;index<JNI_STRING_MAX && g_strings[index].live;++index) {}
+            if (index==JNI_STRING_MAX) return -32;
+            size_t length=strlen(value);
+            if (length>=UINT32_MAX) return -32;
+            uint32_t address=guest_alloc((uint32_t)length+1u);
+            if (!address) return -32;
+            char *copy=guest_range(address,(uint32_t)length+1u);
+            if (!copy) return -31;
+            memcpy(copy,value,length+1u);
+            uint32_t ref;
+            int rc=jni_new_ref(JNI_STRING_OBJECT+index,0,&ref);
+            if (rc) return rc;
+            g_strings[index].address=address;g_strings[index].live=1;cpu->r[0]=ref;
+        } else if (slot==168 || slot==169 || slot==170) { /* UTF-8 String accessors. */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0 || g_jref[i].object<JNI_STRING_OBJECT ||
+                g_jref[i].object>=JNI_STRING_OBJECT+JNI_STRING_MAX) return -31;
+            unsigned index=g_jref[i].object-JNI_STRING_OBJECT;
+            if (!g_strings[index].live) return -31;
+            const char *value=guest_range(g_strings[index].address,1);
+            if (!value || !guest_string(g_strings[index].address)) return -31;
+            if (slot==168) cpu->r[0]=(uint32_t)strlen(value);
+            else if (slot==169) {
+                if (cpu->r[2]) {
+                    uint8_t *is_copy=guest_range(cpu->r[2],4);
+                    if (!is_copy || (cpu->r[2]&3)) return -31;
+                    store32(is_copy,1);
+                }
+                cpu->r[0]=g_strings[index].address;
+            } else {
+                if (cpu->r[2]!=g_strings[index].address) return -31;
+                cpu->r[0]=0;
+            }
+        } else if (slot==176) { /* NewByteArray, bounded reusable backing buffers */
+            uint32_t length=cpu->r[1];
+            if (length>JNI_ARRAY_BYTES) return -32;
+            unsigned index;
+            for (index=0;index<JNI_ARRAY_MAX && g_arrays[index].live;++index) {}
+            if (index==JNI_ARRAY_MAX) return -32;
+            uint32_t ref;
+            int rc=jni_new_ref(JNI_ARRAY_OBJECT+index,0,&ref);if (rc) return rc;
+            if (!g_arrays[index].address) g_arrays[index].address=guest_alloc(JNI_ARRAY_BYTES);
+            if (!g_arrays[index].address) {
+                memset(&g_jref[(ref-g_jrefs)/4],0,sizeof(g_jref[0]));return -32;
+            }
+            memset(guest_range(g_arrays[index].address,length),0,length);
+            g_arrays[index].length=length;g_arrays[index].live=1;cpu->r[0]=ref;
+        } else if (slot==171 || slot==200 || slot==208) { /* Length / byte regions */
+            int i=jni_ref_index(cpu->r[1]);if (i<0) return -31;
+            unsigned object=g_jref[i].object;
+            if (object<JNI_ARRAY_OBJECT || object>=JNI_ARRAY_OBJECT+JNI_ARRAY_MAX) return -31;
+            unsigned index=object-JNI_ARRAY_OBJECT;
+            uint32_t length=g_arrays[index].length;
+            if (slot==171) cpu->r[0]=length;
+            else {
+                uint32_t start=cpu->r[2],count=cpu->r[3];
+                if (start>length || count>length-start) return -31;
+                const uint8_t *arg=guest_range(cpu->r[13],4);
+                if (!arg || (cpu->r[13]&3)) return -31;
+                void *buffer=guest_range(load32(arg),count);
+                if (!buffer && count) return -31;
+                void *array=guest_range(g_arrays[index].address+start,count);
+                if (count) {
+                    if (slot==200) memmove(buffer,array,count);
+                    else memmove(array,buffer,count);
+                }
+                cpu->r[0]=0;
+            }
+        } else if (slot==219) { /* GetJavaVM */
+            uint8_t *out=guest_range(cpu->r[1],4);
+            if (!out || (cpu->r[1]&3)) return -31;
+            store32(out,g_jvm);cpu->r[0]=0;
+        } else if (slot==232) { /* GetObjectRefType, invalid/null -> JNIInvalidRefType */
+            int i=jni_ref_index(cpu->r[1]);
+            cpu->r[0]=i<0?0:g_jref[i].global?2:1;
+        } else if (slot==21 || slot==25) { /* NewGlobalRef / NewLocalRef */
+            if (!cpu->r[1]) cpu->r[0]=0;
+            else {
+                int i=jni_ref_index(cpu->r[1]);if(i<0)return -31;
+                int rc=jni_new_ref(g_jref[i].object,slot==21,&cpu->r[0]);if(rc)return rc;
+            }
+        } else if (slot==22 || slot==23) { /* DeleteGlobalRef / DeleteLocalRef */
+            if (cpu->r[1]) {
+                int i=jni_ref_index(cpu->r[1]);if(i<0 || g_jref[i].global!=(slot==22))return -31;
+                unsigned object=g_jref[i].object;
+                memset(&g_jref[i],0,sizeof(g_jref[i]));
+                if (object>=JNI_ARRAY_OBJECT && object<JNI_ARRAY_OBJECT+JNI_ARRAY_MAX) {
+                    unsigned refs=0;
+                    for (unsigned j=0;j<JNI_REF_MAX;++j) refs+=g_jref[j].object==object;
+                    if (!refs) g_arrays[object-JNI_ARRAY_OBJECT].live=0;
+                }
+            }
+            cpu->r[0]=0;
+        } else if (slot==24) { /* IsSameObject, including null references */
+            int a=cpu->r[1]?jni_ref_index(cpu->r[1]):-1;
+            int b=cpu->r[2]?jni_ref_index(cpu->r[2]):-1;
+            if ((cpu->r[1] && a<0) || (cpu->r[2] && b<0))return -31;
+            cpu->r[0]=a<0 || b<0 ? a==b : g_jref[a].object==g_jref[b].object;
+        } else {dspsp_log("unsupported JNIEnv slot=%u r1=%08x r2=%08x r3=%08x",slot,cpu->r[1],cpu->r[2],cpu->r[3]);return -32;}
+    }
+    cpu->pc=cpu->r[14]&~1u;cpu->thumb=cpu->r[14]&1;return 0;
+}
+
+/* ARM mmap: arguments 5/6 (fd/offset) are at SP and SP+4. Only anonymous
+ * private read/write mappings are supported; never fake file mappings or
+ * protections. Bitmap ownership permits partial unmaps and contiguous reuse. */
+static int mapping_call(const char *name, struct DsArmv6Cpu *cpu) {
+    uint32_t addr = cpu->r[0], size = cpu->r[1], error = 0;
+    uint32_t pages = size / 4096u + !!(size % 4096u);
+    uint32_t capacity = g_image->mmap_size / 4096u;
+    if (capacity > MMAP_PAGES || (g_image->mmap_base & 4095u) ||
+        (g_image->mmap_size & 4095u) ||
+        !guest_range(g_image->mmap_base, g_image->mmap_size)) return -31;
+    int mapping = !strcmp(name, "mmap");
+    if (mapping) {
+        ++g_memory_stats.mmap_calls;
+        if (size > g_memory_stats.mmap_largest_request) g_memory_stats.mmap_largest_request = size;
+    }
+    if (!size) error = 22;
+    else if (!strcmp(name, "mmap")) {
+        const uint8_t *args = guest_range(cpu->r[13], 8);
+        if (!args || (cpu->r[13] & 3)) return -31;
+        if (cpu->r[2] != 3 || cpu->r[3] != 0x22 || load32(args) != UINT32_MAX ||
+            load32(args + 4) != 0) {
+            dspsp_log("unsupported mmap prot=%x flags=%x fd=%x offset=%x",
+                      cpu->r[2], cpu->r[3], load32(args), load32(args+4));
+            return -32;
+        }
+        /* Non-fixed address is a hint; choosing another free address is valid. */
+        unsigned start = 0, run = 0;
+        for (unsigned i = 0; i < capacity; ++i) {
+            if (g_mapped[i]) run = 0;
+            else if (++run == pages) { start = i + 1 - run; break; }
+        }
+        if (run < pages) error = 12;
+        else {
+            uint32_t target = g_image->mmap_base + start * 4096u;
+            memset(guest_range(target, pages * 4096u), 0, pages * 4096u);
+            memset(g_mapped + start, 1, pages);
+            g_memory_stats.mmap_live_bytes += pages * 4096u;
+            if (g_memory_stats.mmap_live_bytes > g_memory_stats.mmap_peak_bytes)
+                g_memory_stats.mmap_peak_bytes = g_memory_stats.mmap_live_bytes;
+            cpu->r[0] = target;
+            dspsp_log("guest mmap bytes=%u rounded=%u address=%08x", size, pages * 4096u, target);
+        }
+    } else {
+        uint64_t end = (uint64_t)addr + (uint64_t)pages * 4096u;
+        if (addr & 4095u) error = 22;
+        else if (addr < g_image->mmap_base || end >
+                 (uint64_t)g_image->mmap_base + g_image->mmap_size) return -32;
+        else {
+            unsigned start = (addr - g_image->mmap_base) / 4096u;
+            for (unsigned i = start; i < start + pages; ++i)
+                if (g_mapped[i]) g_memory_stats.mmap_live_bytes -= 4096u;
+            memset(g_mapped + start, 0, pages);
+            cpu->r[0] = 0;
+        }
+    }
+    if (error) {
+        if (mapping) ++g_memory_stats.mmap_failures;
+        dspsp_log("guest %s failed bytes=%u errno=%u", name, size, error);
+        store32(guest_range(g_errno, 4), error);
+        cpu->r[0] = UINT32_MAX;
+    }
+    return 0;
+}
+
+/* Single guest execution thread (id 1). No host pthread objects are used.
+ * Shared/contended operations stop until a guest scheduler exists. Return
+ * Android errno values to the guest; negative values are interpreter stops. */
+static int mutex_call(const char *name, struct DsArmv6Cpu *cpu) {
+    static const char *supported[] = {
+        "pthread_mutexattr_init", "pthread_mutexattr_destroy",
+        "pthread_mutexattr_gettype", "pthread_mutexattr_settype",
+        "pthread_mutexattr_getpshared", "pthread_mutexattr_setpshared",
+        "pthread_mutex_init", "pthread_mutex_destroy", "pthread_mutex_lock",
+        "pthread_mutex_trylock", "pthread_mutex_unlock"
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i)
+        if (!strcmp(name, supported[i])) break;
+    if (i == sizeof(supported) / sizeof(supported[0])) return -32;
+    uint32_t addr = cpu->r[0], arg = cpu->r[1];
+    if (!addr) { cpu->r[0] = 22; return 0; } /* EINVAL */
+    uint8_t *p = guest_range(addr, 4);
+    if (!p || (addr & 3)) return -31;
+    uint32_t value = load32(p), result = 0;
+    if (!strcmp(name, "pthread_mutexattr_init")) store32(p, 0);
+    else if (!strcmp(name, "pthread_mutexattr_destroy")) store32(p, UINT32_MAX);
+    else if (!strcmp(name, "pthread_mutexattr_settype")) {
+        if (arg > 2) result = 22;
+        else store32(p, (value & ~15u) | arg);
+    } else if (!strcmp(name, "pthread_mutexattr_gettype") ||
+               !strcmp(name, "pthread_mutexattr_getpshared")) {
+        uint8_t *out = guest_range(arg, 4);
+        if (!arg) result = 22;
+        else if (!out || (arg & 3)) return -31;
+        else if ((value & 15) > 2) result = 22;
+        else store32(out, !strcmp(name, "pthread_mutexattr_gettype") ? value & 15 : !!(value & 16));
+    } else if (!strcmp(name, "pthread_mutexattr_setpshared")) {
+        if (arg > 1) result = 22;
+        else store32(p, (value & ~16u) | (arg << 4));
+    } else if (!strcmp(name, "pthread_mutex_init")) {
+        uint32_t attr = 0;
+        if (arg) {
+            const uint8_t *a = guest_range(arg, 4);
+            if (!a || (arg & 3)) return -31;
+            attr = load32(a);
+        }
+        if ((attr & 15) > 2) result = 22;
+        else if (attr & 16) return -32;
+        else store32(p, (attr & 15) << 14);
+    } else if (!strcmp(name, "pthread_mutex_lock") ||
+               !strcmp(name, "pthread_mutex_trylock") ||
+               !strcmp(name, "pthread_mutex_unlock") ||
+               !strcmp(name, "pthread_mutex_destroy")) {
+        unsigned type = (value >> 14) & 3, state = value & 3;
+        unsigned owner = value >> 16;
+        if (value == 0xdead10ccu || type == 3 || state == 3) result = 22;
+        else if (value & 0x2000 || state == 2) return -32;
+        else if ((!type && (value & ~3u)) ||
+                 (!state && (value & 0xffff1ffcu)) ||
+                 (type && state && !owner)) result = 22;
+        else if (!strcmp(name, "pthread_mutex_destroy")) {
+            if (state) result = 16; /* EBUSY */
+            else store32(p, 0xdead10ccu);
+        } else if (!strcmp(name, "pthread_mutex_unlock")) {
+            if (type && (!state || owner != 1)) result = 1; /* EPERM */
+            else if (type == 1 && (value & 0x1ffc)) store32(p, value - 4);
+            else store32(p, type << 14);
+        } else if (!state) {
+            store32(p, (type << 14) | 1u | (type ? 0x10000u : 0));
+        } else if (type && owner == 1) {
+            if (type == 2) result = 35; /* Bionic EDEADLK */
+            else if ((value & 0x1ffc) == 0x1ffc) result = 11; /* EAGAIN, no wrap */
+            else store32(p, value + 4);
+        } else if (!strcmp(name, "pthread_mutex_trylock")) result = 16;
+        else return -32; /* Cannot wait without scheduling another guest thread. */
+    } else return -32;
+    cpu->r[0] = result;
+    return 0;
+}
+
+/* Three 84-byte ARM FILEs followed by three 12-byte extensions. No host
+ * FILE or callback pointers are exposed. Wide I/O is disabled in this ABI. */
+static uint32_t stdio_data(void) {
+    if (g_stdio) return g_stdio;
+    unsigned saved_count = g_count;
+    uint32_t callbacks[4];
+    const char *names[] = {"__sclose", "__sread", "__sseek", "__swrite"};
+    for (unsigned i = 0; i < 4; ++i) {
+        callbacks[i] = (uint32_t)(uintptr_t)ds_import_resolve(0, names[i]);
+        if (!callbacks[i]) { g_count = saved_count; return 0; }
+    }
+    uint32_t addr = guest_alloc(288);
+    if (!addr) { g_count = saved_count; return 0; }
+    uint8_t *p = guest_range(addr, 288);
+    memset(p, 0, 288);
+    for (unsigned i = 0; i < 3; ++i) {
+        uint8_t *f = p + i * 84;
+        f[12] = i == 0 ? 4 : i == 1 ? 8 : 10;
+        f[14] = (uint8_t)i;
+        store32(f + 28, addr + i * 84); /* cookie */
+        for (unsigned j = 0; j < 4; ++j) store32(f + 32 + j * 4, callbacks[j]);
+        store32(f + 48, addr + 252 + i * 12); /* extension */
+    }
+    g_stdio = addr;
+    return addr;
+}
+
+static int standard_stream(uint32_t addr) {
+    if (!g_stdio || addr < g_stdio || addr - g_stdio >= 252 ||
+        (addr - g_stdio) % 84) return -1;
+    return (int)((addr - g_stdio) / 84);
+}
+
+/* Output goes directly to the port log, with no buffered bytes to flush.
+ * -31 is a bad guest range, -32 an unsupported stream; -1 is a sink error. */
+static int stream_write(uint32_t stream, uint32_t addr, uint32_t size) {
+    int index = standard_stream(stream);
+    if (index < 1) return -32;
+    const void *p = guest_range(addr, size);
+    if (!p || size > INT32_MAX) return -31;
+    int written = dspsp_log_write(p, size);
+    if (written < 0 || (uint32_t)written < size) {
+        uint8_t *f = guest_range(stream, 84);
+        f[12] |= 0x40; /* __SERR */
+    }
+    return written < 0 ? -1 : written;
+}
+
+/* Android's legacy C-locale tables: slot 0 is EOF, slots 1..256 are
+ * unsigned bytes. Symbols hold 32-bit pointers to those tables. See
+ * docs/BIONIC_ABI.md for the source contract and high-byte classification. */
+uint32_t ds_import_resolve_data(const char *symbol) {
+    if (!symbol || !g_image) return 0;
+    if (!strcmp(symbol, "__sF")) return stdio_data();
+    int global = !strcmp(symbol, "__page_size") ? 0 :
+                 !strcmp(symbol, "__stack_chk_guard") ? 1 :
+                 !strcmp(symbol, "tzname") ? 2 : -1;
+    if (global >= 0) {
+        if (g_globals[global]) return g_globals[global];
+        uint32_t addr = guest_alloc(global == 2 ? 12 : 4);
+        if (!addr) return 0;
+        uint8_t *p = guest_range(addr, global == 2 ? 12 : 4);
+        if (global == 0) store32(p, 4096);
+        /* Bionic's documented fallback when random canary bytes are unavailable. */
+        else if (global == 1) store32(p, 0xff0a0000u);
+        else {
+            store32(p, addr + 8); store32(p + 4, addr + 8);
+            memcpy(p + 8, "   ", 4); /* WILDABBR, before tzset */
+        }
+        g_globals[global] = addr;
+        return addr;
+    }
+    unsigned kind;
+    if (!strcmp(symbol, "_ctype_")) kind = 0;
+    else if (!strcmp(symbol, "_tolower_tab_")) kind = 1;
+    else if (!strcmp(symbol, "_toupper_tab_")) kind = 2;
+    else return 0;
+    if (g_ctype_objects[kind]) return g_ctype_objects[kind];
+    unsigned width = kind ? 2 : 1;
+    uint32_t object = guest_alloc(4 + 257 * width);
+    if (!object) return 0;
+    uint8_t *p = guest_range(object, 4 + 257 * width);
+    uint32_t table = object + 4;
+    for (unsigned b = 0; b < 4; ++b) p[b] = (uint8_t)(table >> (8 * b));
+    p += 4;
+    p[0] = kind ? 0xff : 0;
+    if (kind) p[1] = 0xff; /* signed short EOF = -1 */
+    for (unsigned c = 0; c < 256; ++c) {
+        unsigned value = c;
+        if (kind == 1 && c >= 'A' && c <= 'Z') value += 'a' - 'A';
+        if (kind == 2 && c >= 'a' && c <= 'z') value -= 'a' - 'A';
+        if (!kind) {
+            if (c < 32 || (c >= 127 && c < 160)) value = 0x20;
+            else if (c == ' ') value = 0x88;
+            else if (c >= '0' && c <= '9') value = 0x04;
+            else if (c >= 'A' && c <= 'Z') value = 0x01;
+            else if (c >= 'a' && c <= 'z') value = 0x02;
+            else value = 0x10;
+            if (c >= 9 && c <= 13) value |= 0x08;
+            if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) value |= 0x40;
+        }
+        p[(c + 1) * width] = (uint8_t)value;
+        if (kind) p[(c + 1) * width + 1] = (uint8_t)(value >> 8);
+    }
+    g_ctype_objects[kind] = object;
+    return object;
+}
+
+int ds_import_take_destructor(uint32_t dso, DsGuestDestructor *out) {
+    if (!out) return -1;
+    for (unsigned i = g_destructor_count; i > 0; --i) {
+        if (dso && g_destructors[i - 1].dso != dso) continue;
+        *out = g_destructors[i - 1];
+        memmove(&g_destructors[i - 1], &g_destructors[i],
+                (g_destructor_count - i) * sizeof(*out));
+        --g_destructor_count;
+        return 1;
+    }
+    return 0;
+}
+
+DsGuestMemoryStats ds_import_memory_stats(void) { return g_memory_stats; }
+
+unsigned ds_import_resolve_count(void) {
+    return g_count;
+}
+
+int ds_import_is_trampoline(uint32_t guest_addr) {
+    if (jni_trampoline(guest_addr)) return 1;
+    return guest_addr >= DS_IMPORT_TRAMP_BASE &&
+           guest_addr < DS_IMPORT_TRAMP_BASE + g_count * 4u &&
+           ((guest_addr - DS_IMPORT_TRAMP_BASE) & 3u) == 0;
+}
+
+static const char *name_for(uint32_t guest_addr) {
+    if (!ds_import_is_trampoline(guest_addr)) return 0;
+    unsigned id = (guest_addr - DS_IMPORT_TRAMP_BASE) / 4u;
+    return id < g_count ? g_names[id] : 0;
+}
+
+/*
+ * ARM EABI arguments arrive in r0-r3.  This bridge deliberately implements
+ * only operations whose ABI is unambiguous in the guest.  Unsupported calls
+ * stop execution with an error; they must never masquerade as successful calls.
+ */
+int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
+    if (cpu && jni_trampoline(guest_addr)) return jni_call(guest_addr,cpu);
+    const char *name = name_for(guest_addr);
+    if (!name || !cpu) return -1;
+
+    if (!strcmp(name, "__stack_chk_fail")) {
+        dspsp_log("guest stack corruption detected pc=0x%08x", cpu->pc);
+        return -33;
+    }
+    if (!strcmp(name, "__aeabi_atexit") || !strcmp(name, "__cxa_atexit")) {
+        int aeabi = !strcmp(name, "__aeabi_atexit");
+        uint32_t function = cpu->r[aeabi ? 1 : 0];
+        uint32_t argument = cpu->r[aeabi ? 0 : 1];
+        /* Registration retains guest addresses; it never calls a host pointer.
+         * Finalization execution is intentionally still unsupported. */
+        if (!function || g_destructor_count == DESTRUCTOR_MAX) cpu->r[0] = UINT32_MAX;
+        else {
+            g_destructors[g_destructor_count++] = (DsGuestDestructor){function, argument, cpu->r[2]};
+            cpu->r[0] = 0;
+        }
+    } else if (!strcmp(name, "sem_init")) {
+        uint8_t *sem=guest_range(cpu->r[0],4);
+        if (!sem || (cpu->r[0]&3)) return -31;
+        if (cpu->r[1]) return -32; /* process-shared synchronization unsupported */
+        if (cpu->r[2]>0x3fffffffu) {
+            if (!g_errno) { g_errno=guest_alloc(4); if (!g_errno) return -31; }
+            store32(guest_range(g_errno,4),22); cpu->r[0]=UINT32_MAX;
+        } else { store32(sem,cpu->r[2]<<1); cpu->r[0]=0; }
+    } else if (!strcmp(name, "fopen")) {
+        const char *path=guest_string(cpu->r[0]), *mode=guest_string(cpu->r[1]);
+        if (!path || !mode) return -31;
+        /* PSP has no Linux procfs. Expose its absence for this optional CPU
+         * discovery file; general asset/file I/O is still unsupported. */
+        if (strcmp(path,"/proc/cpuinfo") || (strcmp(mode,"r") && strcmp(mode,"rb"))) return -32;
+        if (!g_errno) { g_errno=guest_alloc(4); if (!g_errno) return -31; }
+        store32(guest_range(g_errno,4),2); /* ENOENT */
+        cpu->r[0]=0;
+    } else if (!strcmp(name,"pthread_self")) {
+        cpu->r[0]=1; /* same single guest thread ID used by mutex ownership */
+    } else if (!strcmp(name,"pthread_equal")) {
+        cpu->r[0]=(cpu->r[0]==cpu->r[1]);
+    } else if (!strcmp(name,"__atomic_inc") || !strcmp(name,"__atomic_dec")) {
+        uint8_t *word=guest_range(cpu->r[0],4);
+        if (!word || (cpu->r[0]&3)) return -31;
+        uint32_t old=load32(word);
+        store32(word,old+(!strcmp(name,"__atomic_inc")?1u:UINT32_MAX));
+        cpu->r[0]=old;
+    } else if (!strcmp(name, "__atomic_swap")) {
+        /* Bionic ARM ABI: (new_value, address), returns the previous word.
+         * Guest execution is single threaded; no host pointer is exposed. */
+        uint8_t *word=guest_range(cpu->r[1],4);
+        if (!word || (cpu->r[1]&3)) return -31;
+        uint32_t old=load32(word);
+        store32(word,cpu->r[0]); cpu->r[0]=old;
+    } else if (!strcmp(name, "__cxa_guard_acquire") ||
+               !strcmp(name, "__cxa_guard_release") || !strcmp(name, "__cxa_guard_abort")) {
+        /* ARM C++ ABI uses a 32-bit guard, bit 0 means initialized.
+         * Bit 1 is our private pending marker for the single guest thread. */
+        uint8_t *guard=guest_range(cpu->r[0],4);
+        if (!guard || (cpu->r[0]&3)) return -31;
+        uint32_t value=load32(guard);
+        if (!strcmp(name,"__cxa_guard_acquire")) {
+            if (value&1) cpu->r[0]=0;
+            else if (value&2) return -32; /* recursive initialization */
+            else { store32(guard,value|2); cpu->r[0]=1; }
+        } else {
+            if (!(value&2) || (value&1)) return -32;
+            store32(guard,(value&~2u)|(!strcmp(name,"__cxa_guard_release")?1u:0u));
+            cpu->r[0]=0;
+        }
+    } else if (!strcmp(name, "time")) {
+        uint8_t *out=cpu->r[0] ? guest_range(cpu->r[0],4) : NULL;
+        if (cpu->r[0] && !out) return -31;
+        time_t now=time(NULL);
+        /* ARM Bionic time_t is signed 32-bit. No silent Y2038 truncation. */
+        if (now!=(time_t)-1 && (now>(time_t)INT32_MAX || now<(time_t)INT32_MIN))
+            return -32;
+        cpu->r[0]=(uint32_t)now;
+        if (out) store32(out,cpu->r[0]);
+    } else if (!strcmp(name, "gettimeofday")) {
+        /* ARM Bionic timeval is two signed 32-bit fields, regardless of the
+         * host libc layout. The obsolete timezone output is unsupported. */
+        if (cpu->r[1]) return -32;
+        uint8_t *out=cpu->r[0] ? guest_range(cpu->r[0],8) : NULL;
+        if (cpu->r[0] && (!out || (cpu->r[0]&3))) return -31;
+        if (out) {
+            struct timeval now;
+            if (gettimeofday(&now,NULL) || now.tv_sec>INT32_MAX ||
+                now.tv_sec<INT32_MIN || now.tv_usec<0 || now.tv_usec>=1000000)
+                return -32; /* Stop on unavailable/unrepresentable wall time. */
+            store32(out,(uint32_t)now.tv_sec);
+            store32(out+4,(uint32_t)now.tv_usec);
+        }
+        cpu->r[0]=0;
+    } else if (!strcmp(name, "clock")) {
+        /* Bionic ARM clock_t is signed 32-bit microseconds. PSP newlib's
+         * clock() is uptime, so measure the single guest execution thread's
+         * consumed CPU time through the kernel instead. */
+#ifdef __psp__
+        SceKernelThreadRunStatus status={0}; status.size=sizeof(status);
+        if (sceKernelReferThreadRunStatus(sceKernelGetThreadId(),&status)<0) cpu->r[0]=UINT32_MAX;
+        else {
+            unsigned seconds=0, microseconds=0;
+            if (sceKernelSysClock2USec(&status.runClocks,&seconds,&microseconds)<0)
+                cpu->r[0]=UINT32_MAX;
+            else {
+                uint64_t us=(uint64_t)seconds*1000000u+microseconds;
+                cpu->r[0]=us>INT32_MAX ? UINT32_MAX : (uint32_t)us;
+            }
+        }
+#else
+        clock_t ticks = clock();
+        if (ticks == (clock_t)-1) cpu->r[0] = UINT32_MAX;
+        else {
+            uint64_t whole = (uint64_t)ticks / CLOCKS_PER_SEC;
+            uint64_t fraction = (uint64_t)ticks % CLOCKS_PER_SEC;
+            uint64_t us = whole > 2147 ? UINT64_MAX :
+                whole * 1000000u + fraction * 1000000u / CLOCKS_PER_SEC;
+            cpu->r[0] = us > INT32_MAX ? UINT32_MAX : (uint32_t)us;
+        }
+#endif
+    } else if (!strcmp(name, "__errno") || !strcmp(name, "sbrk") ||
+        !strcmp(name, "mmap") || !strcmp(name, "munmap")) {
+        if (!g_image) return -31;
+        if (!g_errno) {
+            g_errno = guest_alloc(4);
+            if (!g_errno) return -31;
+            store32(guest_range(g_errno, 4), 0);
+        }
+        if (!strcmp(name, "mmap") || !strcmp(name, "munmap")) {
+            int rc = mapping_call(name, cpu);
+            if (rc) return rc;
+        } else if (!strcmp(name, "__errno")) cpu->r[0] = g_errno;
+        else {
+            /* sbrk takes a signed 32-bit increment and returns the OLD break. */
+            int64_t delta = cpu->r[0] <= INT32_MAX ? (int64_t)cpu->r[0] :
+                            (int64_t)cpu->r[0] - 0x100000000ll;
+            int64_t next = (int64_t)g_image->brk_used + delta;
+            if (!g_image->brk_size || next < 0 || next > g_image->brk_size) {
+                store32(guest_range(g_errno, 4), 12); /* Android ENOMEM */
+                cpu->r[0] = UINT32_MAX;
+            } else {
+                cpu->r[0] = g_image->brk_base + g_image->brk_used;
+                g_image->brk_used = (uint32_t)next;
+            }
+        }
+    } else if (!strncmp(name, "pthread_mutex", 13)) {
+        int rc = mutex_call(name, cpu);
+        if (rc) {
+            dspsp_log("guest mutex stop: %s error=%d pc=0x%08x", name, rc, cpu->pc);
+            return rc;
+        }
+    } else if (!strcmp(name, "fwrite") || !strcmp(name, "fputs") || !strcmp(name, "__swrite")) {
+        uint32_t stream, addr, count, unit = 1;
+        int is_fwrite = !strcmp(name, "fwrite");
+        int is_fputs = !strcmp(name, "fputs");
+        if (is_fwrite) {
+            addr = cpu->r[0]; unit = cpu->r[1]; count = cpu->r[2]; stream = cpu->r[3];
+            if (unit && count > INT32_MAX / unit) return -31;
+            count *= unit;
+        } else if (is_fputs) {
+            addr = cpu->r[0]; stream = cpu->r[1];
+            const char *str = guest_string(addr);
+            if (!str) return -31;
+            count = (uint32_t)strlen(str);
+        } else {
+            stream = cpu->r[0]; addr = cpu->r[1]; count = cpu->r[2];
+        }
+        if (!is_fwrite && standard_stream(stream) < 1) return -32;
+        int result = count ? stream_write(stream, addr, count) : 0;
+        if (result == -31 || result == -32) return result;
+        cpu->r[0] = is_fwrite ? (result < 0 || !unit ? 0 : (uint32_t)result / unit) :
+                    is_fputs ? (result < 0 || (uint32_t)result != count ? UINT32_MAX : 0) : (uint32_t)result;
+    } else if (!strcmp(name, "fflush") || !strcmp(name, "fileno") ||
+               !strcmp(name, "ferror") || !strcmp(name, "clearerr")) {
+        int index = standard_stream(cpu->r[0]);
+        if (index < 0) return -32;
+        uint8_t *f = guest_range(cpu->r[0], 84);
+        if (!strcmp(name, "fileno")) cpu->r[0] = (uint32_t)index;
+        else if (!strcmp(name, "ferror")) cpu->r[0] = !!(f[12] & 0x40);
+        else {
+            if (!strcmp(name, "clearerr")) f[12] &= (uint8_t)~0x60;
+            cpu->r[0] = 0;
+        }
+    } else if (!strcmp(name, "malloc")) {
+        cpu->r[0] = guest_alloc(cpu->r[0]);
+    } else if (!strcmp(name, "calloc")) {
+        uint32_t n = cpu->r[0], size = cpu->r[1];
+        if (size && n > 0xffffffffu / size) cpu->r[0] = 0;
+        else cpu->r[0] = guest_alloc(n * size);
+        if (cpu->r[0]) memset(guest_range(cpu->r[0], n * size), 0, n * size);
+    } else if (!strcmp(name, "free")) {
+        cpu->r[0] = 0;
+    } else if (!strcmp(name, "memset") || !strcmp(name, "memcpy") ||
+               !strcmp(name, "memmove") || !strcmp(name, "memcmp")) {
+        uint32_t n = cpu->r[2];
+        void *dst = guest_range(cpu->r[0], n);
+        if (!dst) return -31;
+        if (!strcmp(name, "memset")) memset(dst, (int)cpu->r[1], n);
+        else {
+            void *src = guest_range(cpu->r[1], n);
+            if (!src) return -31;
+            if (!strcmp(name, "memcmp")) cpu->r[0] = (uint32_t)memcmp(dst, src, n);
+            else if (!strcmp(name, "memmove")) memmove(dst, src, n);
+            else {
+                uint64_t d = cpu->r[0], s = cpu->r[1];
+                if (n && d < s + n && s < d + n) return -31;
+                memcpy(dst, src, n);
+            }
+        }
+    } else if (!strcmp(name, "strlen") || !strcmp(name, "strcmp")) {
+        const char *a = guest_string(cpu->r[0]);
+        if (!a) return -31;
+        if (!strcmp(name, "strlen")) cpu->r[0] = (uint32_t)strlen(a);
+        else {
+            const char *b = guest_string(cpu->r[1]);
+            if (!b) return -31;
+            cpu->r[0] = (uint32_t)strcmp(a, b);
+        }
+    } else if (!strcmp(name, "__android_log_print")) {
+        cpu->r[0] = 0;
+    } else {
+        dspsp_log("guest import unsupported: %s pc=0x%08x", name, cpu->pc);
+        return -32;
+    }
+
+    cpu->pc = cpu->r[14] & ~1u;
+    cpu->thumb = cpu->r[14] & 1u;
+    return 0;
+}
