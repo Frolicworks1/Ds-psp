@@ -48,13 +48,13 @@ static int run_routine(DsArmImage *mapped, uint32_t entry, unsigned long limit,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2 || argc > 5) {
-        fprintf(stderr,"Usage: %s <guest.so> [entry-virtual-address|constructors|startup|startup-controls [per-routine-instruction-limit [mmap-MiB]]]\n",argv[0]);
+    if (argc < 2 || argc > 6) {
+        fprintf(stderr,"Usage: %s <guest.so> [entry-virtual-address|constructors|startup|startup-controls [per-routine-instruction-limit [mmap-MiB [assets-directory]]]]\n",argv[0]);
         return 64;
     }
     DsArmImage mapped;
     uint32_t mmap_bytes=2u*1024u*1024u;
-    if (argc==5) {
+    if (argc>=5) {
         char *end; errno=0;
         unsigned long mib=strtoul(argv[4],&end,0);
         if (errno || !argv[4][0] || *end || !mib || mib>32) return 64;
@@ -120,6 +120,9 @@ int main(int argc, char **argv) {
             status=run_routine(&mapped,target,limit,0,&steps,args,4,&result);
             if (!status && result!=0x10004 && result!=0x10006) status=2;
             printf("JNI_OnLoad result=%08x status=%d\n",result,status);
+        }
+        if (!status && argc==6 && ds_imports_mount_assets(argv[5])) {
+            fprintf(stderr,"Cannot mount asset directory\n");status=1;
         }
         if (!status) {
             if (ds_imports_start_activity(&activity) ||

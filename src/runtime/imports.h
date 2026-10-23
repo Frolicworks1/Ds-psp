@@ -33,7 +33,10 @@ int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env);
 
 /* Assign the single platform Activity before NativeOnCreate. Returns a local
  * reference; duplicate starts fail. State resets when the image is rebound.
- * Android UI, asset provisioning and lifecycle teardown are not implemented. */
+ * Android UI and lifecycle teardown are not implemented. */
 int ds_imports_start_activity(uint32_t *activity);
+
+/* Mount a trusted extracted APK assets directory after JNI preparation. */
+int ds_imports_mount_assets(const char *root);
 
 #endif

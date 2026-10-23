@@ -132,3 +132,16 @@ endforeach()
 add_test(NAME controls COMMAND test_controls)
 add_test(NAME jni_tables COMMAND test_jni)
 add_test(NAME export_resolution COMMAND test_exports)
+
+# Every import bridge consumer needs the bounded asset backend.
+foreach(asset_consumer probe_guest test_linker test_stdio test_mutex test_sbrk
+        test_mmap test_atexit test_clock test_startup_imports test_clock_psp test_jni test_exports)
+    target_sources(${asset_consumer} PRIVATE ../src/runtime/assets.c)
+endforeach()
+add_executable(test_assets test_assets.c ../src/runtime/assets.c)
+target_compile_options(test_assets PRIVATE -Wall -Wextra -Werror -Wpedantic)
+if(DSPSP_SANITIZE)
+    target_compile_options(test_assets PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(test_assets PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME asset_streams COMMAND test_assets)

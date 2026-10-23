@@ -1,4 +1,5 @@
 #include "imports.h"
+#include "assets.h"
 #include "../cpu/armv6.h"
 #include "arm_loader.h"
 #include "log.h"
@@ -21,7 +22,8 @@ static uint32_t g_errno;
 static uint32_t g_jvm,g_jenv,g_jrefs;
 #define JNI_REF_MAX 64u
 #define JNI_METHOD_MAX 4u
-enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY };
+enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY, JNI_OBJECT_ASSETS };
+static DsAssets g_assets;
 static unsigned g_activity_started;
 /* Object identity is distinct from the lifetime of each local/global handle. */
 static struct { unsigned object,global; } g_jref[JNI_REF_MAX];
@@ -42,6 +44,7 @@ static uint32_t trampoline_for(unsigned id) {
 }
 
 void ds_imports_init(void) {
+    ds_assets_reset(&g_assets);
     memset(g_names, 0, sizeof(g_names));
     g_count = 0;
     g_destructor_count = 0;
@@ -74,6 +77,7 @@ void *ds_import_resolve(const char *library, const char *symbol) {
 
 void ds_imports_bind_image(DsArmImage *image) {
     if (g_image != image) {
+        ds_assets_reset(&g_assets);
         g_destructor_count = 0;
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
@@ -168,6 +172,11 @@ int ds_imports_start_activity(uint32_t *activity) {
     return rc;
 }
 
+int ds_imports_mount_assets(const char *root) {
+    if (!g_jenv) return -1;
+    return ds_assets_mount(&g_assets,root);
+}
+
 static int jni_trampoline(uint32_t addr) {
     return g_jvm && addr>=JNI_TRAMP_BASE && addr<JNI_TRAMP_BASE+(JNI_VM_SLOTS+JNI_ENV_SLOTS)*4 && !(addr&3);
 }
@@ -210,6 +219,15 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
                 !strcmp(signature,"()Landroid/content/res/AssetManager;")) method=3;
             else {dspsp_log("unsupported JNI method slot=%u: %s %s",slot,name,signature);return -32;}
             cpu->r[0]=g_jrefs+(JNI_REF_MAX+method)*4;
+        } else if (slot>=34 && slot<=36) { /* CallObjectMethod[/V/A]: getAssets() */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0) return -31;
+            if (g_jref[i].object!=JNI_OBJECT_ACTIVITY ||
+                cpu->r[2]!=g_jrefs+(JNI_REF_MAX+3)*4) return -32;
+            if (!g_assets.root[0]) {
+                dspsp_log("JNI getAssets requires a mounted extracted APK tree");return -32;
+            }
+            int rc=jni_new_ref(JNI_OBJECT_ASSETS,0,&cpu->r[0]);if (rc) return rc;
         } else if (slot>=114 && slot<=116) { /* CallStaticObjectMethod[/V/A] */
             int i=jni_ref_index(cpu->r[1]);
             if (i<0) return -31;

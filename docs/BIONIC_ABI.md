@@ -323,7 +323,7 @@ These implement single-thread semantics only; spawning threads is still gated.
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
 NativeOnDrawFrame passes EAIO/MainActivity metadata lookup and stops at
-CallObjectMethodV for MainActivity.getAssets (JNI slot 35). Before initialization completes,
+CallStaticVoidMethodV for EAIO.Startup (JNI slot 142), when assets are mounted. Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
 
 
@@ -345,8 +345,8 @@ GetStaticMethodID matches the exact EAIO class, name and descriptor for native
 and separate from object references. This is method metadata only: invoking those
 methods remains unsupported until the asset-manager/native-call bridge exists.
 Unknown classes/method signatures trap; no dummy asset manager or successful
-file operation is returned. First-draw progress is 147 interpreter steps before
-getAssets invocation, 10,832 total including constructors and lifecycle.
+file operation is returned. First-draw progress with mounted assets is 166 interpreter steps before
+EAIO.Startup invocation, 10,851 total including constructors and lifecycle.
 The JNI arena reservation now uses 2,864 total bridge bytes;
 the total mapped arena remains 30,285,824 bytes with zero allocation failures.
 
@@ -372,6 +372,35 @@ CallStaticObjectMethod, V and A variants support this zero-argument method witho
 reading unused argument pointers. Duplicate platform starts fail; reference-table
 exhaustion leaves start retryable. Deleting local handles does not clear the
 singleton. Rebinding the image resets it. Activity teardown/recreation within one
-image and asset provisioning remain unsupported; getAssets explicitly stops.
-The startup-controls trace reaches 10,952 steps; early input callbacks remain
+image remain unsupported. getAssets requires an explicitly mounted asset root.
+The startup-controls trace with assets reaches 10,971 steps; early input callbacks remain
 gated by incomplete game initialization.
+
+### Extracted asset backend
+
+`ds_imports_mount_assets(root)` mounts a trusted, extracted APK `assets/` tree
+once after JNI preparation. Missing/non-directory roots fail. Rebinding the image
+or resetting imports unmounts it and closes all streams. This is a local trusted
+data interface, not a filesystem sandbox: the supplied tree must have no symlinks.
+Absolute guest names, dot/dot-dot components, backslashes, drive prefixes, empty
+components and path truncation are rejected. Only regular files open, read-only.
+
+`DsAssets` owns at most 16 host streams, with no host pointers exposed as guest
+handles. Reads are bounded by caller capacity; skip clamps to EOF. The C backend
+returns zero at EOF (the future Java InputStream bridge must translate that to
+Java's -1). It does not allocate whole asset files. Synthetic tests cover binary
+bytes, EOF, independent positions, capacity and reset. A standalone backend check
+matched the staged 3,119-byte EAMCore.ini and 15,904,488-byte font using 4 KiB reads.
+
+CallObjectMethod/V/A for getAssets returns independent local handles to one asset
+manager identity, requiring the activity instance and exact method ID. Without a
+mount it stops. The native probe accepts an optional final assets-directory:
+
+```
+probe_guest guest.so startup 100000 18 /path/to/extracted/assets
+```
+
+With it, the donor next invokes EAIO.Startup through JNI slot142. Native JNI
+callback dispatch, Java strings/arrays and AssetManager/InputStream operations
+are not wired yet; no game-issued file read or rendered frame is claimed. The
+PSP diagnostic entry point remains unchanged.

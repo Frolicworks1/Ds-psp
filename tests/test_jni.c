@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#include <unistd.h>
 #include "../src/runtime/imports.h"
 #include "../src/cpu/armv6.h"
 #include <stdio.h>
@@ -86,6 +88,22 @@ int main(void) {
  CHECK(call(115,activity,assetsMethod,0)==-32);
  CHECK(call(115,0,instanceMethod,0)==-31);
  CHECK(call(35,receiver,assetsMethod,0)==-32); /* assets not provisioned */
+ char assetRoot[]="/tmp/ds-jni-assets-XXXXXX";CHECK(mkdtemp(assetRoot));
+ CHECK(ds_imports_mount_assets("/does-not-exist/ds-assets")==-1);
+ CHECK(!ds_imports_mount_assets(assetRoot) && ds_imports_mount_assets(assetRoot)==-1);
+ uint32_t manager=0;
+ for(unsigned slot=34;slot<=36;++slot) {
+  CHECK(!call(slot,receiver,assetsMethod,0xffffffff));uint32_t ref=cpu.r[0];
+  CHECK(!call(24,ref,receiver,0) && !cpu.r[0]);
+  if (!manager) {CHECK(!call(21,ref,0,0));manager=cpu.r[0];}
+  CHECK(!call(24,ref,manager,0) && cpu.r[0]);
+  CHECK(!call(23,ref,0,0));
+ }
+ CHECK(call(35,activity,assetsMethod,0)==-32);
+ CHECK(call(35,receiver,instanceMethod,0)==-32);
+ CHECK(call(35,0,assetsMethod,0)==-31);
+ CHECK(!call(22,manager,0,0));
+ CHECK(!rmdir(assetRoot));
  CHECK(!call(23,receiver,0,0)); /* singleton survives handle deletion */
  CHECK(!call(115,activity,instanceMethod,0));receiver=cpu.r[0];
  CHECK(receiver && !call(23,receiver,0,0));
@@ -114,6 +132,7 @@ int main(void) {
  CHECK(!call(115,activity,instanceMethod,0) && !cpu.r[0]);
  CHECK(!call(23,refs[0],0,0));
  CHECK(!ds_imports_start_activity(&receiver)); /* allocation failure is retryable */
+ CHECK(call(35,receiver,assetsMethod,0)==-32); /* mount reset with image */
  ds_imports_bind_image(NULL);ds_imports_bind_image(&im);im.heap_used=im.bridge_size-8;
  CHECK(ds_imports_prepare_jni(&vm,&env)==-1 && !vm && !env && im.heap_used==im.bridge_size-8);
  puts("JNI tables, class/method identity, local/global lifetimes, capacity and bounds passed");return 0;
