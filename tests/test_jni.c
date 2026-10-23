@@ -132,6 +132,36 @@ int main(void) {
    CHECK(cpu.pc==0x4000 && cpu.thumb && cpu.r[13]==0x1f00);
   }
  }
+ CHECK(!call(31,manager,0,0));uint32_t managerClass=cpu.r[0];
+ strcpy((char*)mem+1024,"android/content/res/AssetManager");
+ CHECK(!call(6,0x1400,0,0));uint32_t foundClass=cpu.r[0];
+ CHECK(!call(24,managerClass,foundClass,0) && cpu.r[0]);
+ CHECK(!call(23,foundClass,0,0) && !call(23,managerClass,0,0));
+ CHECK(!call(31,receiver,0,0));foundClass=cpu.r[0];
+ CHECK(!call(24,foundClass,activity,0) && cpu.r[0]);
+ CHECK(!call(23,foundClass,0,0));
+ CHECK(call(31,0,0,0)==-31 && call(31,activity,0,0)==-32);
+ const struct {const char *cls,*name,*sig;} methods[]={
+  {"java/io/InputStream","read","([BII)I"},
+  {"java/io/InputStream","skip","(J)J"},
+  {"java/io/InputStream","close","()V"},
+  {"android/content/res/AssetManager","open","(Ljava/lang/String;)Ljava/io/InputStream;"},
+  {"android/content/res/AssetManager","openFd","(Ljava/lang/String;)Landroid/content/res/AssetFileDescriptor;"},
+  {"android/content/res/AssetManager","list","(Ljava/lang/String;)[Ljava/lang/String;"},
+  {"android/content/res/AssetFileDescriptor","getLength","()J"}
+ };
+ uint32_t methodIds[7];
+ for(unsigned j=0;j<7;++j) {
+  strcpy((char*)mem+1024,methods[j].cls);strcpy((char*)mem+1152,methods[j].name);
+  strcpy((char*)mem+1280,methods[j].sig);
+  CHECK(!call(6,0x1400,0,0));uint32_t cls=cpu.r[0];
+  CHECK(!call(33,cls,0x1480,0x1500));methodIds[j]=cpu.r[0];
+  for(unsigned k=0;k<j;++k)CHECK(methodIds[k]!=methodIds[j]);
+  CHECK(call(113,cls,0x1480,0x1500)==-32);
+  CHECK(call(33,eaio,0x1480,0x1500)==-32);
+  strcpy((char*)mem+1280,"()Z");CHECK(call(33,cls,0x1480,0x1500)==-32);
+  CHECK(!call(23,cls,0,0));
+ }
  CHECK(!call(22,manager,0,0));
  CHECK(!rmdir(assetRoot));
  CHECK(!call(23,receiver,0,0)); /* singleton survives handle deletion */

@@ -323,7 +323,7 @@ These implement single-thread semantics only; spawning threads is still gated.
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
 NativeOnDrawFrame passes EAIO/MainActivity metadata lookup and stops at
-FindClass("java/io/InputStream") inside native EAIO.Startup, when assets are mounted. Before initialization completes,
+the gettimeofday import after EAIO metadata/buffer setup, when assets are mounted. Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
 
 
@@ -345,9 +345,9 @@ GetStaticMethodID matches the exact EAIO class, name and descriptor for native
 and separate from object references. Startup dispatches to its validated native export when explicitly bound; Shutdown
 invocation remains unsupported.
 Unknown classes/method signatures trap; no dummy asset manager or successful
-file operation is returned. First-draw progress with mounted assets is 186 interpreter steps before
-InputStream class lookup, 10,871 total including constructors and lifecycle.
-The JNI arena reservation now uses 2,864 total bridge bytes;
+file operation is returned. First-draw progress with mounted assets is 341 interpreter steps before
+gettimeofday, 11,026 total including constructors and lifecycle.
+The JNI arena reservation now uses 68,424 total bridge bytes (including one 64 KiB byte-array buffer);
 the total mapped arena remains 30,285,824 bytes with zero allocation failures.
 
 ### MainActivity metadata evidence
@@ -373,7 +373,7 @@ reading unused argument pointers. Duplicate platform starts fail; reference-tabl
 exhaustion leaves start retryable. Deleting local handles does not clear the
 singleton. Rebinding the image resets it. Activity teardown/recreation within one
 image remain unsupported. getAssets requires an explicitly mounted asset root.
-The startup-controls trace with assets reaches 10,991 steps; early input callbacks remain
+The startup-controls trace with assets reaches 11,146 steps; early input callbacks remain
 gated by incomplete game initialization.
 
 ### Extracted asset backend
@@ -401,8 +401,8 @@ probe_guest guest.so startup 100000 18 /path/to/extracted/assets
 ```
 
 With it, the donor invokes EAIO.Startup through JNI slot142 and reaches
-InputStream class lookup. Java strings/arrays and AssetManager/InputStream
-operations are not wired yet; no game-issued file read or rendered frame is claimed. The
+InputStream/asset metadata and allocates its byte-array buffer. Java strings and
+AssetManager/InputStream operations are not wired yet; no game-issued file read or rendered frame is claimed. The
 PSP diagnostic entry point remains unchanged.
 
 ### Native EAIO call bridge
@@ -422,5 +422,27 @@ interpreter is introduced. Native targets reset on image rebinding.
 
 EAIO's next GetJavaVM call writes the existing VM pointer to a checked, aligned
 guest output and returns JNI_OK. The donor then requests java/io/InputStream;
-that class still stops explicitly. Native Startup has entered but has not yet
-returned. Automatic JNI local-frame cleanup remains unimplemented as above.
+that metadata is now supported. The current stop is the gettimeofday import.
+Automatic JNI local-frame cleanup remains unimplemented as above.
+
+### Stream metadata and bounded byte arrays
+
+Platform adapters expose exact instance-method descriptors for InputStream
+read([BII)I, skip(J)J, close()V; AssetManager open(String), openFd(String),
+list(String); and AssetFileDescriptor getLength()J. These are metadata entries,
+not Android framework class initialization or successful stream operations.
+Static/instance, declaring-class and descriptor mismatches stop. GetObjectClass
+supports activity and asset-manager objects with independent local references.
+
+NewByteArray uses four reusable buffers of at most 65,536 bytes each within the
+existing bridge arena. Buffers allocate lazily, are zeroed before reuse and are
+recycled only after the last explicit local/global reference is deleted. No
+whole-file allocation is introduced. GetArrayLength and Get/SetByteArrayRegion
+validate type, signed-range equivalents, guest pointers and the ARM stack buffer
+argument. Region copies handle overlap. Exhaustion, unsupported lengths and
+invalid arguments stop; Java exceptions and automatic local-frame cleanup are
+still absent. Backing reservations remain until the image is unloaded.
+
+The real donor now reaches gettimeofday at 11,026 startup steps (11,146 with
+input callbacks), with 68,424 bridge bytes and unchanged 30,285,824 mapped bytes.
+There is still no guest-issued asset read, frame or gameplay verification.

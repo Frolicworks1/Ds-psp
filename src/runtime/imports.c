@@ -21,8 +21,27 @@ static uint32_t g_stdio;
 static uint32_t g_errno;
 static uint32_t g_jvm,g_jenv,g_jrefs;
 #define JNI_REF_MAX 64u
-#define JNI_METHOD_MAX 4u
-enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY, JNI_OBJECT_ASSETS };
+enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY, JNI_OBJECT_ASSETS,
+       JNI_CLASS_INPUT_STREAM, JNI_CLASS_ASSETS, JNI_CLASS_ASSET_DESCRIPTOR };
+/* IDs are table indices; keep the first four bootstrap IDs stable. */
+static const struct { unsigned object,slot; const char *name,*signature; } jni_methods[]={
+    {JNI_CLASS_EAIO,113,"Startup","(Landroid/content/res/AssetManager;)V"},
+    {JNI_CLASS_EAIO,113,"Shutdown","()V"},
+    {JNI_CLASS_ACTIVITY,113,"GetInstance","()Lcom/ea/blast/MainActivity;"},
+    {JNI_CLASS_ACTIVITY,33,"getAssets","()Landroid/content/res/AssetManager;"},
+    {JNI_CLASS_INPUT_STREAM,33,"read","([BII)I"},
+    {JNI_CLASS_INPUT_STREAM,33,"skip","(J)J"},
+    {JNI_CLASS_INPUT_STREAM,33,"close","()V"},
+    {JNI_CLASS_ASSETS,33,"open","(Ljava/lang/String;)Ljava/io/InputStream;"},
+    {JNI_CLASS_ASSETS,33,"openFd","(Ljava/lang/String;)Landroid/content/res/AssetFileDescriptor;"},
+    {JNI_CLASS_ASSETS,33,"list","(Ljava/lang/String;)[Ljava/lang/String;"},
+    {JNI_CLASS_ASSET_DESCRIPTOR,33,"getLength","()J"}
+};
+#define JNI_METHOD_MAX (sizeof(jni_methods)/sizeof(jni_methods[0]))
+#define JNI_ARRAY_MAX 4u
+#define JNI_ARRAY_BYTES 65536u
+#define JNI_ARRAY_OBJECT 256u
+static struct { uint32_t address,length; unsigned live; } g_arrays[JNI_ARRAY_MAX];
 static DsAssets g_assets;
 static unsigned g_activity_started;
 static uint32_t g_eaio_startup;
@@ -46,6 +65,7 @@ static uint32_t trampoline_for(unsigned id) {
 
 void ds_imports_init(void) {
     ds_assets_reset(&g_assets);
+    memset(g_arrays,0,sizeof(g_arrays));
     memset(g_names, 0, sizeof(g_names));
     g_count = 0;
     g_destructor_count = 0;
@@ -80,6 +100,7 @@ void *ds_import_resolve(const char *library, const char *symbol) {
 void ds_imports_bind_image(DsArmImage *image) {
     if (g_image != image) {
         ds_assets_reset(&g_assets);
+        memset(g_arrays,0,sizeof(g_arrays));
         g_destructor_count = 0;
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
@@ -214,6 +235,9 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
             unsigned object;
             if (!strcmp(name,"com/ea/EAIO/EAIO")) object=JNI_CLASS_EAIO;
             else if (!strcmp(name,"com/ea/blast/MainActivity")) object=JNI_CLASS_ACTIVITY;
+            else if (!strcmp(name,"java/io/InputStream")) object=JNI_CLASS_INPUT_STREAM;
+            else if (!strcmp(name,"android/content/res/AssetManager")) object=JNI_CLASS_ASSETS;
+            else if (!strcmp(name,"android/content/res/AssetFileDescriptor")) object=JNI_CLASS_ASSET_DESCRIPTOR;
             else {dspsp_log("unsupported JNI class: %s",name);return -32;}
             /* EAIO has no <clinit>. MainActivity's only initializer sets
              * activityExists=false, its default value. This creates class
@@ -224,15 +248,22 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
             const char *name=guest_string(cpu->r[2]),*signature=guest_string(cpu->r[3]);
             if(i<0 || !name || !signature)return -31;
             unsigned method;
-            if(slot==113 && g_jref[i].object==JNI_CLASS_EAIO && !strcmp(name,"Startup") &&
-                !strcmp(signature,"(Landroid/content/res/AssetManager;)V")) method=0;
-            else if(slot==113 && g_jref[i].object==JNI_CLASS_EAIO && !strcmp(name,"Shutdown") && !strcmp(signature,"()V")) method=1;
-            else if(slot==113 && g_jref[i].object==JNI_CLASS_ACTIVITY && !strcmp(name,"GetInstance") &&
-                !strcmp(signature,"()Lcom/ea/blast/MainActivity;")) method=2;
-            else if(slot==33 && g_jref[i].object==JNI_CLASS_ACTIVITY && !strcmp(name,"getAssets") &&
-                !strcmp(signature,"()Landroid/content/res/AssetManager;")) method=3;
-            else {dspsp_log("unsupported JNI method slot=%u: %s %s",slot,name,signature);return -32;}
+            for (method=0;method<JNI_METHOD_MAX;++method)
+                if (jni_methods[method].object==g_jref[i].object &&
+                    jni_methods[method].slot==slot &&
+                    !strcmp(jni_methods[method].name,name) &&
+                    !strcmp(jni_methods[method].signature,signature)) break;
+            if (method==JNI_METHOD_MAX) {
+                dspsp_log("unsupported JNI method slot=%u: %s %s",slot,name,signature);return -32;
+            }
             cpu->r[0]=g_jrefs+(JNI_REF_MAX+method)*4;
+        } else if (slot==31) { /* GetObjectClass for implemented platform objects */
+            int i=jni_ref_index(cpu->r[1]);if (i<0) return -31;
+            unsigned object;
+            if (g_jref[i].object==JNI_OBJECT_ACTIVITY) object=JNI_CLASS_ACTIVITY;
+            else if (g_jref[i].object==JNI_OBJECT_ASSETS) object=JNI_CLASS_ASSETS;
+            else return -32;
+            int rc=jni_new_ref(object,0,&cpu->r[0]);if (rc) return rc;
         } else if (slot>=34 && slot<=36) { /* CallObjectMethod[/V/A]: getAssets() */
             int i=jni_ref_index(cpu->r[1]);
             if (i<0) return -31;
@@ -274,6 +305,41 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
             cpu->r[2]=manager;
             cpu->pc=g_eaio_startup&~1u;cpu->thumb=g_eaio_startup&1;
             return 0;
+        } else if (slot==176) { /* NewByteArray, bounded reusable backing buffers */
+            uint32_t length=cpu->r[1];
+            if (length>JNI_ARRAY_BYTES) return -32;
+            unsigned index;
+            for (index=0;index<JNI_ARRAY_MAX && g_arrays[index].live;++index) {}
+            if (index==JNI_ARRAY_MAX) return -32;
+            uint32_t ref;
+            int rc=jni_new_ref(JNI_ARRAY_OBJECT+index,0,&ref);if (rc) return rc;
+            if (!g_arrays[index].address) g_arrays[index].address=guest_alloc(JNI_ARRAY_BYTES);
+            if (!g_arrays[index].address) {
+                memset(&g_jref[(ref-g_jrefs)/4],0,sizeof(g_jref[0]));return -32;
+            }
+            memset(guest_range(g_arrays[index].address,length),0,length);
+            g_arrays[index].length=length;g_arrays[index].live=1;cpu->r[0]=ref;
+        } else if (slot==171 || slot==200 || slot==208) { /* Length / byte regions */
+            int i=jni_ref_index(cpu->r[1]);if (i<0) return -31;
+            unsigned object=g_jref[i].object;
+            if (object<JNI_ARRAY_OBJECT || object>=JNI_ARRAY_OBJECT+JNI_ARRAY_MAX) return -31;
+            unsigned index=object-JNI_ARRAY_OBJECT;
+            uint32_t length=g_arrays[index].length;
+            if (slot==171) cpu->r[0]=length;
+            else {
+                uint32_t start=cpu->r[2],count=cpu->r[3];
+                if (start>length || count>length-start) return -31;
+                const uint8_t *arg=guest_range(cpu->r[13],4);
+                if (!arg || (cpu->r[13]&3)) return -31;
+                void *buffer=guest_range(load32(arg),count);
+                if (!buffer && count) return -31;
+                void *array=guest_range(g_arrays[index].address+start,count);
+                if (count) {
+                    if (slot==200) memmove(buffer,array,count);
+                    else memmove(array,buffer,count);
+                }
+                cpu->r[0]=0;
+            }
         } else if (slot==219) { /* GetJavaVM */
             uint8_t *out=guest_range(cpu->r[1],4);
             if (!out || (cpu->r[1]&3)) return -31;
@@ -290,7 +356,13 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
         } else if (slot==22 || slot==23) { /* DeleteGlobalRef / DeleteLocalRef */
             if (cpu->r[1]) {
                 int i=jni_ref_index(cpu->r[1]);if(i<0 || g_jref[i].global!=(slot==22))return -31;
+                unsigned object=g_jref[i].object;
                 memset(&g_jref[i],0,sizeof(g_jref[i]));
+                if (object>=JNI_ARRAY_OBJECT && object<JNI_ARRAY_OBJECT+JNI_ARRAY_MAX) {
+                    unsigned refs=0;
+                    for (unsigned j=0;j<JNI_REF_MAX;++j) refs+=g_jref[j].object==object;
+                    if (!refs) g_arrays[object-JNI_ARRAY_OBJECT].live=0;
+                }
             }
             cpu->r[0]=0;
         } else if (slot==24) { /* IsSameObject, including null references */

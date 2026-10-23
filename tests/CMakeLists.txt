@@ -149,3 +149,11 @@ add_test(NAME asset_streams COMMAND test_assets)
 # Exercise native JNI dispatch through real ARM and Thumb return instructions.
 target_sources(test_jni PRIVATE ../src/cpu/armv6.c)
 target_link_libraries(test_jni PRIVATE ds_softfloat)
+
+add_executable(test_jni_arrays test_jni_arrays.c ../src/runtime/imports.c ../src/runtime/assets.c host/log.c)
+target_compile_options(test_jni_arrays PRIVATE -Wall -Wextra -Werror -Wpedantic)
+if(DSPSP_SANITIZE)
+    target_compile_options(test_jni_arrays PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(test_jni_arrays PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME jni_byte_arrays COMMAND test_jni_arrays)
