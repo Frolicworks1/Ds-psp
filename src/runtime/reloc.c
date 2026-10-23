@@ -50,6 +50,12 @@ static int symbol_value(LinkContext *c, uint32_t index, uint32_t *value) {
     for (unsigned i = 0; i < sizeof(name) && i < c->strsz - sym.st_name; ++i) {
         if (read_virtual(c, (uint64_t)c->strtab + sym.st_name + i, &name[i], 1)) return -1;
         if (!name[i]) {
+            if (ELF32_ST_TYPE(sym.st_info) == STT_OBJECT) {
+                *value = ds_import_resolve_data(name);
+                if (*value) return 0;
+                dspsp_log("unsupported or unallocatable guest data import: %s", name);
+                return -1;
+            }
             if (ELF32_ST_TYPE(sym.st_info) != STT_FUNC &&
                 ELF32_ST_TYPE(sym.st_info) != STT_NOTYPE) {
                 dspsp_log("unsupported guest data import: %s", name);

@@ -11,6 +11,7 @@
 static char g_names[DS_IMPORT_MAX][256];
 static unsigned g_count;
 static DsArmImage *g_image;
+static uint32_t g_ctype_objects[3];
 
 static uint32_t trampoline_for(unsigned id) {
     return DS_IMPORT_TRAMP_BASE + id * 4u;
@@ -20,6 +21,7 @@ void ds_imports_init(void) {
     memset(g_names, 0, sizeof(g_names));
     g_count = 0;
     g_image = 0;
+    memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
 }
 
 void *ds_import_resolve(const char *library, const char *symbol) {
@@ -37,7 +39,10 @@ void *ds_import_resolve(const char *library, const char *symbol) {
     return (void *)(uintptr_t)trampoline_for(g_count - 1);
 }
 
-void ds_imports_bind_image(DsArmImage *image) { g_image = image; }
+void ds_imports_bind_image(DsArmImage *image) {
+    if (g_image != image) memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
+    g_image = image;
+}
 
 static void *guest_range(uint32_t addr, uint32_t size) {
     if (!g_image || addr < g_image->image_base) return 0;
@@ -61,8 +66,50 @@ static uint32_t guest_alloc(uint32_t size) {
     size = (size + 7u) & ~7u;
     if (size > g_image->heap_size - g_image->heap_used) return 0;
     uint32_t p = g_image->heap_base + g_image->heap_used;
+    if (p < g_image->heap_base || size > UINT32_MAX - p || !guest_range(p, size)) return 0;
     g_image->heap_used += size;
     return p;
+}
+
+/* Android's legacy C-locale tables: slot 0 is EOF, slots 1..256 are
+ * unsigned bytes. Symbols hold 32-bit pointers to those tables. See
+ * docs/BIONIC_ABI.md for the source contract and high-byte classification. */
+uint32_t ds_import_resolve_data(const char *symbol) {
+    if (!symbol || !g_image) return 0;
+    unsigned kind;
+    if (!strcmp(symbol, "_ctype_")) kind = 0;
+    else if (!strcmp(symbol, "_tolower_tab_")) kind = 1;
+    else if (!strcmp(symbol, "_toupper_tab_")) kind = 2;
+    else return 0;
+    if (g_ctype_objects[kind]) return g_ctype_objects[kind];
+    unsigned width = kind ? 2 : 1;
+    uint32_t object = guest_alloc(4 + 257 * width);
+    if (!object) return 0;
+    uint8_t *p = guest_range(object, 4 + 257 * width);
+    uint32_t table = object + 4;
+    for (unsigned b = 0; b < 4; ++b) p[b] = (uint8_t)(table >> (8 * b));
+    p += 4;
+    p[0] = kind ? 0xff : 0;
+    if (kind) p[1] = 0xff; /* signed short EOF = -1 */
+    for (unsigned c = 0; c < 256; ++c) {
+        unsigned value = c;
+        if (kind == 1 && c >= 'A' && c <= 'Z') value += 'a' - 'A';
+        if (kind == 2 && c >= 'a' && c <= 'z') value -= 'a' - 'A';
+        if (!kind) {
+            if (c < 32 || (c >= 127 && c < 160)) value = 0x20;
+            else if (c == ' ') value = 0x88;
+            else if (c >= '0' && c <= '9') value = 0x04;
+            else if (c >= 'A' && c <= 'Z') value = 0x01;
+            else if (c >= 'a' && c <= 'z') value = 0x02;
+            else value = 0x10;
+            if (c >= 9 && c <= 13) value |= 0x08;
+            if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) value |= 0x40;
+        }
+        p[(c + 1) * width] = (uint8_t)value;
+        if (kind) p[(c + 1) * width + 1] = (uint8_t)(value >> 8);
+    }
+    g_ctype_objects[kind] = object;
+    return object;
 }
 
 unsigned ds_import_resolve_count(void) {

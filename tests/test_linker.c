@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "bionic_ctype_expected.h"
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 static unsigned char file[2048], memory[2048];
 static char path[] = "/tmp/dspsp-link-XXXXXX";
@@ -43,6 +44,44 @@ static int apply(DsArmImage *im) {
     return ds_arm_apply_relocations(path,im);
 }
 static uint32_t word(void) { uint32_t v; memcpy(&v,memory+0x500,4); return v; }
+static uint32_t le32(const unsigned char *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1]<<8 | (uint32_t)p[2]<<16 | (uint32_t)p[3]<<24;
+}
+static void test_data_imports(void) {
+    unsigned char arena[4096] = {0};
+    DsArmImage im={.image=arena,.image_base=0x1000,.image_size=1536,
+                   .heap_base=0x1600,.heap_size=2560};
+    ds_imports_init(); ds_imports_bind_image(&im);
+    const char *names[]={"_ctype_", "_tolower_tab_", "_toupper_tab_"};
+    uint32_t addresses[3];
+    for (unsigned kind=0; kind<3; ++kind) {
+        uint32_t addr=ds_import_resolve_data(names[kind]); addresses[kind]=addr;
+        CHECK(addr>=im.heap_base && addr<im.heap_base+im.heap_size);
+        uint32_t used=im.heap_used;
+        CHECK(ds_import_resolve_data(names[kind])==addr && im.heap_used==used);
+        uint32_t table=le32(arena+addr-im.image_base);
+        CHECK(table==addr+4 && !ds_import_is_trampoline(addr));
+        for (unsigned i=0; i<257; ++i) {
+            unsigned char *p=arena+table-im.image_base+i*(kind?2:1);
+            unsigned actual=kind ? (unsigned)p[0] | (unsigned)p[1]<<8 : p[0];
+            unsigned expected=kind==0 ? expected_ctype[i] :
+                (uint16_t)(kind==1 ? expected_lower[i] : expected_upper[i]);
+            CHECK(actual==expected);
+        }
+    }
+    CHECK(ds_import_resolve_count()==0);
+    CHECK(ds_import_resolve_data("__sF")==0 && ds_import_resolve_data(NULL)==0);
+    /* Relocation must store the address of the pointer variable, not its value. */
+    fixture(R_ARM_GLOB_DAT,STT_OBJECT);
+    put(0x400,"\0_ctype_",9);
+    Elf32_Dyn dyn={.d_tag=DT_STRSZ,.d_un.d_val=9}; put(0x120,&dyn,sizeof(dyn));
+    CHECK(apply(&im)==0); CHECK(le32(arena+0x500)==addresses[0]);
+    /* No heap consumption on exhaustion; initialize registry for each image. */
+    ds_imports_init(); ds_imports_bind_image(&im); im.heap_size=8; im.heap_used=0;
+    CHECK(ds_import_resolve_data("_ctype_")==0 && im.heap_used==0);
+    ds_imports_bind_image(NULL); CHECK(ds_import_resolve_data("_ctype_")==0);
+    ds_imports_init();
+}
 int main(void) {
     int fd=mkstemp(path); CHECK(fd>=0); close(fd);
     DsArmImage im={ .image=memory, .image_base=0x1000, .image_size=1024+512, .heap_base=0x1600, .heap_size=512 };
@@ -91,5 +130,6 @@ int main(void) {
     DsArmImage loaded; CHECK(ds_arm_loader_load(path,&loaded)==0); ds_arm_loader_unload(&loaded);
     Elf32_Phdr ph={.p_type=PT_LOAD,.p_vaddr=0xfffffff0,.p_memsz=0x100}; put(sizeof(Elf32_Ehdr),&ph,sizeof(ph));
     CHECK(apply(&im)==-7); CHECK(ds_arm_loader_load(path,&loaded)==-5);
+    test_data_imports();
     unlink(path); puts("linker/import bounds and semantics passed"); return 0;
 }

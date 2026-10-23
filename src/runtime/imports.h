@@ -11,6 +11,8 @@ struct DsArmv6Cpu;
 void ds_imports_init(void);
 void ds_imports_bind_image(DsArmImage *image);
 void *ds_import_resolve(const char *library, const char *symbol);
+/* Returns a guest address of a data object, never a host pointer. Zero fails. */
+uint32_t ds_import_resolve_data(const char *symbol);
 unsigned ds_import_resolve_count(void);
 int ds_import_is_trampoline(uint32_t guest_addr);
 int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu);
