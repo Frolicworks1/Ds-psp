@@ -17,6 +17,9 @@ static uint32_t g_errno;
 #define MMAP_PAGES 512u
 static uint8_t g_mapped[MMAP_PAGES];
 static uint32_t g_globals[3];
+#define DESTRUCTOR_MAX 1024u
+static DsGuestDestructor g_destructors[DESTRUCTOR_MAX];
+static unsigned g_destructor_count;
 
 static uint32_t trampoline_for(unsigned id) {
     return DS_IMPORT_TRAMP_BASE + id * 4u;
@@ -25,6 +28,7 @@ static uint32_t trampoline_for(unsigned id) {
 void ds_imports_init(void) {
     memset(g_names, 0, sizeof(g_names));
     g_count = 0;
+    g_destructor_count = 0;
     g_image = 0;
     g_stdio = 0;
     g_errno = 0;
@@ -50,6 +54,7 @@ void *ds_import_resolve(const char *library, const char *symbol) {
 
 void ds_imports_bind_image(DsArmImage *image) {
     if (g_image != image) {
+        g_destructor_count = 0;
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
         g_errno = 0;
@@ -333,6 +338,19 @@ uint32_t ds_import_resolve_data(const char *symbol) {
     return object;
 }
 
+int ds_import_take_destructor(uint32_t dso, DsGuestDestructor *out) {
+    if (!out) return -1;
+    for (unsigned i = g_destructor_count; i > 0; --i) {
+        if (dso && g_destructors[i - 1].dso != dso) continue;
+        *out = g_destructors[i - 1];
+        memmove(&g_destructors[i - 1], &g_destructors[i],
+                (g_destructor_count - i) * sizeof(*out));
+        --g_destructor_count;
+        return 1;
+    }
+    return 0;
+}
+
 unsigned ds_import_resolve_count(void) {
     return g_count;
 }
@@ -362,7 +380,18 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
         dspsp_log("guest stack corruption detected pc=0x%08x", cpu->pc);
         return -33;
     }
-    if (!strcmp(name, "__errno") || !strcmp(name, "sbrk") ||
+    if (!strcmp(name, "__aeabi_atexit") || !strcmp(name, "__cxa_atexit")) {
+        int aeabi = !strcmp(name, "__aeabi_atexit");
+        uint32_t function = cpu->r[aeabi ? 1 : 0];
+        uint32_t argument = cpu->r[aeabi ? 0 : 1];
+        /* Registration retains guest addresses; it never calls a host pointer.
+         * Finalization execution is intentionally still unsupported. */
+        if (!function || g_destructor_count == DESTRUCTOR_MAX) cpu->r[0] = UINT32_MAX;
+        else {
+            g_destructors[g_destructor_count++] = (DsGuestDestructor){function, argument, cpu->r[2]};
+            cpu->r[0] = 0;
+        }
+    } else if (!strcmp(name, "__errno") || !strcmp(name, "sbrk") ||
         !strcmp(name, "mmap") || !strcmp(name, "munmap")) {
         if (!g_image) return -31;
         if (!g_errno) {

@@ -87,11 +87,11 @@ not reproduced. Bad guest memory or alignment stops before state mutation.
 ## Execution checkpoint
 
 All seven required data globals resolve for the recorded donor. The bounded
-first-constructor probe now reaches `__aeabi_atexit` at trampoline `0xf0000248` after
-1,639 successful steps, then stops. No complete constructor, JNI initialization
-or gameplay is established. The donor requested mappings of 16,781,312 and 16,777,216 bytes; both returned
-ENOMEM under the current budget. Continued execution does not prove that its
-allocator is usable. Investigate the larger memory requirement before gameplay.
+first-constructor probe returns to its sentinel after 1,640 successful steps,
+including cleanup registration. Its two mappings (16,781,312 and 16,777,216 bytes)
+still fail ENOMEM. Returning from this routine does not establish a usable heap,
+successful game initialization or correctness of all interpreter instructions.
+The other 207 constructors and JNI startup are still untested.
 
 ELF PLT stubs that load PC directly dispatch registered imports before instruction
 fetch; synthetic tests cover this path independently of the donor.
@@ -136,3 +136,21 @@ The prior 6 MiB program-break pool is reduced to 4 MiB to retain the total 8 MiB
 arena; this is a diagnostic allocation budget change, not a PSP model guarantee.
 The next work includes larger-budget measurements, C++ cleanup registration and
 constructor enumeration. No successful donor mmap is recorded yet.
+
+## C++ cleanup registration
+
+`__aeabi_atexit(object, destructor, dso)` and
+`__cxa_atexit(destructor, object, dso)` now retain guest callback addresses,
+arguments and DSO identities in a bounded 1,024-entry registry. A full registry
+or null callback returns -1; success returns zero. No host callback is invoked.
+The future shutdown runner can use `ds_import_take_destructor` to remove the
+newest matching entry before executing it, preserving reverse registration
+order and preventing duplicate invocation. DSO zero selects all registrations.
+Registry state resets with import initialization or a different image binding.
+
+This implements registration only. `__cxa_finalize`, exit processing and actual
+destructor execution still stop as unsupported; no clean shutdown is claimed.
+Synthetic tests cover both argument orders, Thumb callback addresses, DSO
+filtering, reverse ordering, exhaustion, reuse and reset. The reference contract
+is [Bionic atexit.c](https://android.googlesource.com/platform/bionic/+/android-4.0.1_r1/libc/stdlib/atexit.c)
+and the ARM C++ ABI's __aeabi_atexit argument order.
