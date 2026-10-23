@@ -323,7 +323,7 @@ These implement single-thread semantics only; spawning threads is still gated.
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
 NativeOnDrawFrame passes EAIO/MainActivity metadata lookup and stops at
-CallStaticObjectMethodV for MainActivity.GetInstance (JNI slot 115). Before initialization completes,
+CallObjectMethodV for MainActivity.getAssets (JNI slot 35). Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
 
 
@@ -345,8 +345,8 @@ GetStaticMethodID matches the exact EAIO class, name and descriptor for native
 and separate from object references. This is method metadata only: invoking those
 methods remains unsupported until the asset-manager/native-call bridge exists.
 Unknown classes/method signatures trap; no dummy asset manager or successful
-file operation is returned. First-draw progress is 116 interpreter steps before
-GetInstance invocation, 10,801 total including constructors and lifecycle.
+file operation is returned. First-draw progress is 147 interpreter steps before
+getAssets invocation, 10,832 total including constructors and lifecycle.
 The JNI arena reservation now uses 2,864 total bridge bytes;
 the total mapped arena remains 30,285,824 bytes with zero allocation failures.
 
@@ -362,5 +362,16 @@ The host native callback alone does not perform this Java lifecycle.
 Exact static `GetInstance()Lcom/ea/blast/MainActivity;` and inherited instance
 `getAssets()Landroid/content/res/AssetManager;` metadata have distinct IDs.
 Static/instance mismatches, incorrect declaring class and return descriptors
-stop. Invocation remains unsupported pending explicit lifecycle and asset
-semantics. The bridge does not execute Android superclass initialization.
+stop. GetInstance invocation now returns null before explicit platform activity
+creation, then a fresh local reference to the singleton instance. The platform
+calls `ds_imports_start_activity` before NativeOnCreate and supplies its receiver
+to activity creation/focus callbacks. This implements the observed singleton
+assignment, not Android UI construction or superclass initialization.
+
+CallStaticObjectMethod, V and A variants support this zero-argument method without
+reading unused argument pointers. Duplicate platform starts fail; reference-table
+exhaustion leaves start retryable. Deleting local handles does not clear the
+singleton. Rebinding the image resets it. Activity teardown/recreation within one
+image and asset provisioning remain unsupported; getAssets explicitly stops.
+The startup-controls trace reaches 10,952 steps; early input callbacks remain
+gated by incomplete game initialization.

@@ -70,18 +70,51 @@ int main(void) {
  CHECK(call(113,eaio,0x11c0,0x1200)==-32); /* wrong declaring class */
  CHECK(call(33,eaio,0x1240,0x1280)==-32);
  CHECK(call(113,activity,0x11c0,0x1280)==-32); /* wrong return type */
- CHECK(call(114,activity,instanceMethod,0)==-32); /* no fabricated instance */
+ for(unsigned slot=114;slot<=116;++slot)
+  CHECK(!call(slot,activity,instanceMethod,0xffffffff) && !cpu.r[0]);
+ uint32_t receiver=99;CHECK(ds_imports_start_activity(NULL)==-31);
+ CHECK(!ds_imports_start_activity(&receiver) && receiver);
+ uint32_t duplicate=99;CHECK(ds_imports_start_activity(&duplicate)==-31 && !duplicate);
+ for(unsigned slot=114;slot<=116;++slot) {
+  CHECK(!call(slot,activity,instanceMethod,0xffffffff));uint32_t copy=cpu.r[0];
+  CHECK(copy!=receiver && !call(24,copy,receiver,0) && cpu.r[0]);
+  CHECK(!call(24,copy,activity,0) && !cpu.r[0]);
+  CHECK(!call(23,copy,0,0));
+ }
+ CHECK(call(115,eaio,instanceMethod,0)==-32);
+ CHECK(call(115,receiver,instanceMethod,0)==-32);
+ CHECK(call(115,activity,assetsMethod,0)==-32);
+ CHECK(call(115,0,instanceMethod,0)==-31);
+ CHECK(call(35,receiver,assetsMethod,0)==-32); /* assets not provisioned */
+ CHECK(!call(23,receiver,0,0)); /* singleton survives handle deletion */
+ CHECK(!call(115,activity,instanceMethod,0));receiver=cpu.r[0];
+ CHECK(receiver && !call(23,receiver,0,0));
  CHECK(call(21,assetsMethod,0,0)==-31);
  CHECK(!call(23,activity,0,0) && !call(23,eaio,0,0));
  uint32_t refs[64];
  for(unsigned i=0;i<64;++i){CHECK(!call(6,0x1000,0,0));refs[i]=cpu.r[0];}
  CHECK(call(6,0x1000,0,0)==-32 && im.heap_used==used);
+ /* A full local-reference table also prevents GetInstance results. */
+ CHECK(!call(23,refs[0],0,0));
+ CHECK(!call(6,0x1180,0,0));activity=cpu.r[0];
+ CHECK(call(115,activity,instanceMethod,0)==-32);
  for(unsigned i=0;i<64;++i)CHECK(!call(23,refs[i],0,0));
  CHECK(!call(6,0x1000,0,0) && im.heap_used==used);
  CHECK(call(141,cpu.r[0],startup,0)==-32); /* lookup is not method execution */
  cpu.r[0]=vm;CHECK(ds_import_call(version,&cpu)==-31);
  ds_imports_bind_image(NULL);CHECK(!ds_import_is_trampoline(getenv));
- ds_imports_bind_image(&im);im.heap_used=im.bridge_size-8;
+ CHECK(ds_imports_start_activity(&receiver)==-31 && !receiver);
+ ds_imports_bind_image(&im);im.heap_used=0;
+ CHECK(!ds_imports_prepare_jni(&vm,&env));
+ CHECK(!call(6,0x1180,0,0));activity=cpu.r[0];
+ CHECK(!call(113,activity,0x11c0,0x1200));instanceMethod=cpu.r[0];
+ CHECK(!call(115,activity,instanceMethod,0) && !cpu.r[0]);
+ for(unsigned i=0;i<63;++i){CHECK(!call(6,0x1000,0,0));refs[i]=cpu.r[0];}
+ receiver=99;CHECK(ds_imports_start_activity(&receiver)==-32 && !receiver);
+ CHECK(!call(115,activity,instanceMethod,0) && !cpu.r[0]);
+ CHECK(!call(23,refs[0],0,0));
+ CHECK(!ds_imports_start_activity(&receiver)); /* allocation failure is retryable */
+ ds_imports_bind_image(NULL);ds_imports_bind_image(&im);im.heap_used=im.bridge_size-8;
  CHECK(ds_imports_prepare_jni(&vm,&env)==-1 && !vm && !env && im.heap_used==im.bridge_size-8);
  puts("JNI tables, class/method identity, local/global lifetimes, capacity and bounds passed");return 0;
 }

@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
                mapped.init_count,attempted,returned,skipped,mapped.init_count-attempted-skipped);
     } else status=run_routine(&mapped,entry,limit,1,&steps,NULL,0,NULL);
     if (!status && startup) {
-        uint32_t vm,env,target,result,args[4]={0};
+        uint32_t vm,env,target,result,activity=0,args[4]={0};
         if (ds_imports_prepare_jni(&vm,&env) ||
             ds_arm_find_export(argv[1],&mapped,"JNI_OnLoad",&target)) status=1;
         else {
@@ -122,9 +122,10 @@ int main(int argc, char **argv) {
             printf("JNI_OnLoad result=%08x status=%d\n",result,status);
         }
         if (!status) {
-            if (ds_arm_find_export(argv[1],&mapped,"Java_com_ea_blast_MainActivity_NativeOnCreate",&target)) status=1;
+            if (ds_imports_start_activity(&activity) ||
+                ds_arm_find_export(argv[1],&mapped,"Java_com_ea_blast_MainActivity_NativeOnCreate",&target)) status=1;
             else {
-                args[0]=env;
+                args[0]=env;args[1]=activity;
                 printf("STARTUP NativeOnCreate entry=%08x\n",target);
                 status=run_routine(&mapped,target,limit,0,&steps,args,4,&result);
                 printf("NativeOnCreate status=%d\n",status);
@@ -156,7 +157,7 @@ int main(int argc, char **argv) {
                 if (status) break;
             }
             if (ds_arm_find_export(argv[1],&mapped,stages[i].name,&target)) {status=1;break;}
-            args[0]=env;args[1]=0;args[2]=stages[i].a;args[3]=stages[i].b;
+            args[0]=env;args[1]=i==3?activity:0;args[2]=stages[i].a;args[3]=stages[i].b;
             printf("STARTUP %s entry=%08x\n",stages[i].name,target);
             status=run_routine(&mapped,target,limit,0,&steps,args,4,&result);
             printf("STARTUP stage=%u status=%d\n",i,status);

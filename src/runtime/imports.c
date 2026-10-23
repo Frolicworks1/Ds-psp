@@ -21,7 +21,8 @@ static uint32_t g_errno;
 static uint32_t g_jvm,g_jenv,g_jrefs;
 #define JNI_REF_MAX 64u
 #define JNI_METHOD_MAX 4u
-enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY };
+enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY };
+static unsigned g_activity_started;
 /* Object identity is distinct from the lifetime of each local/global handle. */
 static struct { unsigned object,global; } g_jref[JNI_REF_MAX];
 #define JNI_TRAMP_BASE 0xf1000000u
@@ -48,6 +49,7 @@ void ds_imports_init(void) {
     g_stdio = 0;
     g_errno = 0;
     g_jvm = g_jenv = g_jrefs = 0;
+    g_activity_started = 0;
     memset(g_jref,0,sizeof(g_jref));
     memset(g_mapped, 0, sizeof(g_mapped));
     memset(&g_memory_stats, 0, sizeof(g_memory_stats));
@@ -77,6 +79,7 @@ void ds_imports_bind_image(DsArmImage *image) {
         g_stdio = 0;
         g_errno = 0;
         g_jvm = g_jenv = g_jrefs = 0;
+        g_activity_started = 0;
         memset(g_jref,0,sizeof(g_jref));
         memset(g_mapped, 0, sizeof(g_mapped));
         memset(&g_memory_stats, 0, sizeof(g_memory_stats));
@@ -154,6 +157,17 @@ static int jni_new_ref(unsigned object,unsigned global,uint32_t *out) {
     return -32;
 }
 
+/* Platform equivalent of assigning MainActivity.instance before NativeOnCreate.
+ * One activity per bound image; this does not run Android UI initialization. */
+int ds_imports_start_activity(uint32_t *activity) {
+    if (!activity) return -31;
+    *activity=0;
+    if (!g_jenv || g_activity_started) return -31;
+    int rc=jni_new_ref(JNI_OBJECT_ACTIVITY,0,activity);
+    if (!rc) g_activity_started=1;
+    return rc;
+}
+
 static int jni_trampoline(uint32_t addr) {
     return g_jvm && addr>=JNI_TRAMP_BASE && addr<JNI_TRAMP_BASE+(JNI_VM_SLOTS+JNI_ENV_SLOTS)*4 && !(addr&3);
 }
@@ -196,6 +210,18 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
                 !strcmp(signature,"()Landroid/content/res/AssetManager;")) method=3;
             else {dspsp_log("unsupported JNI method slot=%u: %s %s",slot,name,signature);return -32;}
             cpu->r[0]=g_jrefs+(JNI_REF_MAX+method)*4;
+        } else if (slot>=114 && slot<=116) { /* CallStaticObjectMethod[/V/A] */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0) return -31;
+            if (g_jref[i].object!=JNI_CLASS_ACTIVITY ||
+                cpu->r[2]!=g_jrefs+(JNI_REF_MAX+2)*4) return -32;
+            /* GetInstance has no parameters: do not dereference the va_list
+             * or jvalue pointer. Each non-null result is a new local ref. */
+            if (!g_activity_started) cpu->r[0]=0;
+            else {
+                int rc=jni_new_ref(JNI_OBJECT_ACTIVITY,0,&cpu->r[0]);
+                if (rc) return rc;
+            }
         } else if (slot==232) { /* GetObjectRefType, invalid/null -> JNIInvalidRefType */
             int i=jni_ref_index(cpu->r[1]);
             cpu->r[0]=i<0?0:g_jref[i].global?2:1;
