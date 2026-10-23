@@ -1,145 +1,139 @@
 #include "reloc.h"
 #include "imports.h"
+#include "log.h"
 #include <pspiofilemgr.h>
 #include <elf.h>
 #include <string.h>
 #include <stdint.h>
 
-static int read_at(SceUID fd, SceOff off, void *buf, unsigned int size) {
-    if (sceIoLseek(fd, off, PSP_SEEK_SET) < 0) return -1;
-    return sceIoRead(fd, buf, size) == (int)size ? 0 : -1;
+/* Guest addresses equal ELF virtual addresses: the load bias is zero even
+ * when the lowest PT_LOAD address (image_base) is nonzero. Host pointers are
+ * never written into the guest image. Failure leaves an unusable partial image;
+ * callers must discard it and must not execute it. */
+typedef struct {
+    SceUID fd;
+    Elf32_Phdr ph[32];
+    unsigned count;
+    uint32_t symtab, strtab, strsz;
+} LinkContext;
+
+static int read_at(SceUID fd, SceOff off, void *buf, unsigned size) {
+    return sceIoLseek(fd, off, PSP_SEEK_SET) < 0 ||
+           sceIoRead(fd, buf, size) != (int)size ? -1 : 0;
 }
 
-static SceOff vaddr_to_file(const Elf32_Phdr *ph, unsigned n, uint32_t v) {
-    for (unsigned i = 0; i < n; ++i)
-        if (ph[i].p_type == PT_LOAD && v >= ph[i].p_vaddr && v - ph[i].p_vaddr < ph[i].p_filesz)
-            return (SceOff)ph[i].p_offset + (SceOff)(v - ph[i].p_vaddr);
-    return (SceOff)-1;
-}
-
-static uint32_t *ptr32(DsArmImage *im, uint32_t v) {
-    if (!im || !im->image || v < im->image_base ||
-        v - im->image_base > im->image_size - sizeof(uint32_t)) return 0;
-    return (uint32_t *)(void *)(im->image + v - im->image_base);
-}
-
-static uint32_t resolve_sym(const DsArmImage *im, uint32_t sym_value) {
-    return im->image_base + (sym_value - im->image_base);
-}
-
-/*
- * Apply self-relative relocations that do not require Android/ELF imports.
- * External symbol resolution is deliberately left to the PSP compatibility
- * layer rather than guessing libc/GLES/JNI addresses.
- */
-int ds_arm_apply_relocations(const char *path, DsArmImage *image) {
-    ds_imports_init();
-    if (!path || !image || !image->image) return -1;
-
-    SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
-    if (fd < 0) return -2;
-
-    Elf32_Ehdr eh;
-    if (read_at(fd, 0, &eh, sizeof(eh)) < 0) {
-        sceIoClose(fd); return -3;
+static int read_virtual(LinkContext *c, uint64_t addr, void *buf, unsigned size) {
+    if (addr > UINT32_MAX || size > (uint64_t)UINT32_MAX + 1 - addr) return -1;
+    for (unsigned i = 0; i < c->count; ++i) {
+        const Elf32_Phdr *p = &c->ph[i];
+        if (p->p_type != PT_LOAD || addr < p->p_vaddr) continue;
+        uint64_t off = addr - p->p_vaddr;
+        if (off <= p->p_filesz && size <= p->p_filesz - off)
+            return read_at(c->fd, (SceOff)p->p_offset + off, buf, size);
     }
+    return -1;
+}
 
-    uint32_t rel_off=0, rel_sz=0, rel_ent=sizeof(Elf32_Rel);
-    uint32_t jmprel_off=0, jmprel_sz=0, jmprel_type=0;
-    uint32_t symtab=0, strtab=0, strsz=0, syment=sizeof(Elf32_Sym);
-    Elf32_Phdr phdrs[32];
-    unsigned phnum=eh.e_phnum>32?32:eh.e_phnum;
-    int dynamic_found=0;
-
-    for (unsigned i=0; i<phnum; ++i) {
-        Elf32_Phdr ph;
-        if (read_at(fd, (SceOff)eh.e_phoff + (SceOff)i * eh.e_phentsize,
-                    &ph, sizeof(ph)) < 0) {
-            sceIoClose(fd); return -4;
-        }
-        phdrs[i]=ph;
-        if (ph.p_type != PT_DYNAMIC) continue;
-        dynamic_found=1;
-        unsigned count=ph.p_filesz / sizeof(Elf32_Dyn);
-        for (unsigned j=0;j<count;++j) {
-            Elf32_Dyn d;
-            if (read_at(fd, ph.p_offset + (SceOff)j*sizeof(d), &d, sizeof(d)) < 0) {
-                sceIoClose(fd); return -5;
+static int symbol_value(LinkContext *c, uint32_t index, uint32_t *value) {
+    if (!index) { *value = 0; return 0; }
+    Elf32_Sym sym;
+    if (!c->symtab || read_virtual(c, (uint64_t)c->symtab +
+        (uint64_t)index * sizeof(sym), &sym, sizeof(sym))) return -1;
+    if (sym.st_shndx != SHN_UNDEF) {
+        if (sym.st_shndx >= SHN_LORESERVE && sym.st_shndx != SHN_ABS) return -1;
+        *value = sym.st_value;
+        return 0;
+    }
+    if (ELF32_ST_BIND(sym.st_info) == STB_WEAK) { *value = 0; return 0; }
+    if (!c->strtab || sym.st_name >= c->strsz) return -1;
+    char name[256];
+    for (unsigned i = 0; i < sizeof(name) && i < c->strsz - sym.st_name; ++i) {
+        if (read_virtual(c, (uint64_t)c->strtab + sym.st_name + i, &name[i], 1)) return -1;
+        if (!name[i]) {
+            if (ELF32_ST_TYPE(sym.st_info) != STT_FUNC &&
+                ELF32_ST_TYPE(sym.st_info) != STT_NOTYPE) {
+                dspsp_log("unsupported guest data import: %s", name);
+                return -1;
             }
-            if (d.d_tag == DT_REL) rel_off=d.d_un.d_ptr;
-            else if (d.d_tag == DT_RELSZ) rel_sz=d.d_un.d_val;
-            else if (d.d_tag == DT_RELENT && d.d_un.d_val) rel_ent=d.d_un.d_val;
-            else if (d.d_tag == DT_JMPREL) jmprel_off=d.d_un.d_ptr;
-            else if (d.d_tag == DT_PLTRELSZ) jmprel_sz=d.d_un.d_val;
-            else if (d.d_tag == DT_PLTREL) jmprel_type=d.d_un.d_val;
-            else if (d.d_tag == DT_SYMTAB) symtab=d.d_un.d_ptr;
-            else if (d.d_tag == DT_STRTAB) strtab=d.d_un.d_ptr;
-            else if (d.d_tag == DT_STRSZ) strsz=d.d_un.d_val;
-            else if (d.d_tag == DT_SYMENT && d.d_un.d_val) syment=d.d_un.d_val;
+            void *target = ds_import_resolve(0, name);
+            if (!target) return -1;
+            *value = (uint32_t)(uintptr_t)target;
+            return 0;
         }
     }
+    return -1;
+}
 
-    if (!dynamic_found) {
-        sceIoClose(fd); return 0;
-    }
-    if (rel_ent != sizeof(Elf32_Rel) || (rel_sz && rel_sz % rel_ent) || (jmprel_sz && (jmprel_type != DT_REL || jmprel_sz % sizeof(Elf32_Rel)))) {
-        sceIoClose(fd); return -6;
-    }
-
-    for (uint32_t off=0; off<rel_sz; off+=rel_ent) {
+static int apply_table(LinkContext *c, DsArmImage *im, uint32_t addr, uint32_t size) {
+    for (uint32_t off = 0; off < size; off += sizeof(Elf32_Rel)) {
         Elf32_Rel rel;
-        SceOff fo=vaddr_to_file(phdrs,phnum,rel_off+off);
-        if (fo==(SceOff)-1 || read_at(fd,fo,&rel,sizeof(rel)) < 0) {
-            sceIoClose(fd); return -7;
-        }
-        uint32_t type=ELF32_R_TYPE(rel.r_info);
-        uint32_t sym_index=ELF32_R_SYM(rel.r_info);
-        uint32_t *where=ptr32(image, rel.r_offset);
-        if (!where) { sceIoClose(fd); return -8; }
-
+        if (read_virtual(c, (uint64_t)addr + off, &rel, sizeof(rel))) return -7;
+        unsigned type = ELF32_R_TYPE(rel.r_info), index = ELF32_R_SYM(rel.r_info);
+        if (type == R_ARM_NONE) continue;
+        if (rel.r_offset < im->image_base || im->image_size < 4 ||
+            rel.r_offset - im->image_base > im->image_size - 4 || (rel.r_offset & 3)) return -8;
+        uint8_t *where = im->image + rel.r_offset - im->image_base;
+        uint32_t addend, value;
+        memcpy(&addend, where, 4);
         if (type == R_ARM_RELATIVE) {
-            *where = image->image_base + *where;
-        } else if (type == R_ARM_ABS32) {
-            /*
-             * For an already linked self-contained image this is enough to
-             * rebase values that point inside the image. Imported symbols
-             * are resolved later by the compatibility layer.
-             */
-            if (*where >= image->image_base &&
-                *where < image->image_base + image->image_size)
-                *where = resolve_sym(image, *where);
-        } else if (type == R_ARM_JUMP_SLOT || type == R_ARM_GLOB_DAT) {
-            /* External symbol lookup is intentionally deferred until the dynamic
-             * symbol/string tables are parsed; never write a guessed address. */
-            (void)sym_index;
-        } else if (type == R_ARM_NONE) {
-            continue;
-        }
+            if (index) return -9;
+            value = addend; /* B + A; B is zero. */
+        } else if (type == R_ARM_ABS32 || type == R_ARM_GLOB_DAT || type == R_ARM_JUMP_SLOT) {
+            if (symbol_value(c, index, &value)) return -10;
+            if (type == R_ARM_ABS32) value += addend;
+        } else return -11;
+        memcpy(where, &value, 4);
     }
-
-    if (jmprel_off && jmprel_sz && symtab && strtab && syment == sizeof(Elf32_Sym)) {
-        for (uint32_t off=0; off<jmprel_sz; off+=sizeof(Elf32_Rel)) {
-            Elf32_Rel rel;
-            SceOff fo=vaddr_to_file(phdrs,phnum,jmprel_off+off);
-            if (fo==(SceOff)-1 || read_at(fd,fo,&rel,sizeof(rel))<0) continue;
-            uint32_t idx=ELF32_R_SYM(rel.r_info);
-            SceOff sf=vaddr_to_file(phdrs,phnum,symtab+idx*syment);
-            Elf32_Sym sym;
-            if (sf==(SceOff)-1 || read_at(fd,sf,&sym,sizeof(sym))<0 || sym.st_name>=strsz) continue;
-            SceOff nf=vaddr_to_file(phdrs,phnum,strtab+sym.st_name);
-            if (nf==(SceOff)-1) continue;
-            char name[128]; unsigned k=0;
-            for (; k+1<sizeof(name) && k+sym.st_name<strsz; ++k) {
-                if (read_at(fd,nf+k,&name[k],1)<0) { k=0; break; }
-                if (!name[k]) break;
-            }
-            if (k==0) continue;
-            name[sizeof(name)-1]=0;
-            void *target=ds_import_resolve(0,name);
-            uint32_t *where=ptr32(image,rel.r_offset);
-            if (target && where) *where=(uint32_t)(uintptr_t)target;
-        }
-    }
-    sceIoClose(fd);
     return 0;
+}
+
+int ds_arm_apply_relocations(const char *path, DsArmImage *image) {
+    if (!path || !image || !image->image) return -1;
+    LinkContext c = {0};
+    c.fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    if (c.fd < 0) return -2;
+    int rc = -3;
+    Elf32_Ehdr eh;
+    if (read_at(c.fd, 0, &eh, sizeof(eh)) || memcmp(eh.e_ident, ELFMAG, SELFMAG) ||
+        eh.e_ident[EI_CLASS] != ELFCLASS32 || eh.e_ident[EI_DATA] != ELFDATA2LSB ||
+        eh.e_machine != EM_ARM || eh.e_phentsize != sizeof(Elf32_Phdr) ||
+        eh.e_phnum > 32) goto done;
+    c.count = eh.e_phnum;
+    uint32_t rel = 0, relsz = 0, jmp = 0, jmpsz = 0, plt = 0;
+    int dynamic = 0;
+    for (unsigned i = 0; i < c.count; ++i) {
+        if (read_at(c.fd, (SceOff)eh.e_phoff + i * sizeof(Elf32_Phdr), &c.ph[i], sizeof(c.ph[i]))) goto done;
+        Elf32_Phdr *p = &c.ph[i];
+        if (p->p_type != PT_DYNAMIC) continue;
+        if (dynamic++ || p->p_filesz % sizeof(Elf32_Dyn)) goto done;
+        int terminated = 0;
+        for (uint32_t off = 0; off < p->p_filesz; off += sizeof(Elf32_Dyn)) {
+            Elf32_Dyn d;
+            if (read_at(c.fd, (SceOff)p->p_offset + off, &d, sizeof(d))) goto done;
+            uint32_t v = d.d_un.d_val;
+            if (d.d_tag == DT_NULL) { terminated = 1; break; }
+            switch (d.d_tag) {
+                case DT_REL: rel = v; break;
+                case DT_RELSZ: relsz = v; break;
+                case DT_RELENT: if (v != sizeof(Elf32_Rel)) goto done; break;
+                case DT_JMPREL: jmp = v; break;
+                case DT_PLTRELSZ: jmpsz = v; break;
+                case DT_PLTREL: plt = v; break;
+                case DT_SYMTAB: c.symtab = v; break;
+                case DT_STRTAB: c.strtab = v; break;
+                case DT_STRSZ: c.strsz = v; break;
+                case DT_SYMENT: if (v != sizeof(Elf32_Sym)) goto done; break;
+                case DT_RELASZ: if (v) goto done; break;
+                default: break;
+            }
+        }
+        if (!terminated) goto done;
+    }
+    if (relsz % sizeof(Elf32_Rel) || jmpsz % sizeof(Elf32_Rel) ||
+        (jmpsz && plt != DT_REL)) goto done;
+    rc = apply_table(&c, image, rel, relsz);
+    if (!rc) rc = apply_table(&c, image, jmp, jmpsz);
+done:
+    sceIoClose(c.fd);
+    return rc;
 }

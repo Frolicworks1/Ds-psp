@@ -32,7 +32,7 @@ binaries/assets and personal saves out of commits.
 | Stage | Work | Acceptance gate | Current state |
 | --- | --- | --- | --- |
 | M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and 13 CPU groups pass locally; physical/emulator boot not yet verified |
-| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | Next: current unrelocated first-constructor trace reaches an unresolved PLT target |
+| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; real donor linking stops at unsupported `_toupper_tab_` data import |
 | M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter only; VFP and many instructions remain absent |
 | M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Unimplemented beyond a few memory/string imports |
 | M4: first genuine frame | Map exercised GLES 1.x functions to GU/GUM; handle state, geometry, textures, formats and render targets | Original game produces a recognizable menu/loading frame; captures and logs confirm real guest rendering; no fabricated image | Not reached |
@@ -70,18 +70,21 @@ build-host/probe_guest /path/to/libDeadSpace.so
 build-host/probe_guest /path/to/libDeadSpace.so 0x27e72c 512
 ```
 
-These are **unrelocated**, bounded entry probes. They do not implement Android,
-call host native imports or initialize the game. Exit 0 means the selected
+These are **relocated**, bounded entry probes using the limited memory/string
+import bridge. Unsupported data imports reject linking; unsupported function
+calls stop execution with the symbol and PC. They do not implement Android or
+initialize the game. Exit 0 means the selected
 routine returned to the sentinel; exit 2 means execution stopped or reached its
-instruction limit; exit 1 means loader failure. An entry probe returning is not
+instruction limit; exit 1 means loader/linker failure. An entry probe returning is not
 proof that constructors or JNI startup work.
 
 ## Handling risks without hiding them
 
 - Stop at unknown instructions, invalid targets and unimplemented required
-  services. The legacy import bridge currently returns zero for many unknown
-  services; it must be replaced with explicit capability/error handling before
-  full game initialization. Never count such a return as successful integration.
+  services. The import bridge now stops unknown calls with error -32. `realloc` is also
+  unsupported until allocation sizes are tracked (the old implementation could
+  read past the old allocation). Logging is discarded and `free` does not yet
+  reclaim the bump allocator; these limits must be resolved before full startup.
 - Prove relocation semantics, import ownership and guest-memory bounds before
   expanding execution. The current linker/import bridge needs dedicated tests.
 - Measure both 32 MiB and 64 MiB PSP memory budgets. No model support is claimed
@@ -101,3 +104,24 @@ The release record must contain installation/cold-launch checks, actual menu and
 level captures, controls/audio checks, save/reload checks, frame-time and memory
 measurements, crash/error logs and the tested PSP model/firmware or PPSSPP build.
 No original-game executable is currently claimed to pass these gates.
+
+## M1 linking checkpoint
+
+The loader retains ELF virtual addresses (zero load bias). ABS32 uses S+A;
+GLOB_DAT/JUMP_SLOT use S; RELATIVE uses A. Both REL tables are processed and
+unsupported relocation types fail. Import names are owned by the registry, and
+relocation no longer resets its image binding. Failed relocation invalidates the
+image for execution; reload it before retrying.
+
+Synthetic tests cover nonzero image bases, defined/imported symbols, main and PLT
+REL tables, malformed targets/strings/symbol indices, unknown relocations, data
+import rejection, memory/string bounds and stable import ownership. This is not
+a complete hostile-ELF validator: overlapping segments/tables and complete dynamic
+symbol counts still need validation before M1 is complete.
+
+The exact donor now stops before constructor execution at `_toupper_tab_`.
+Its seven required data symbols are `_toupper_tab_`, `_tolower_tab_`, `_ctype_`,
+`__sF`, `tzname`, `__page_size`, and `__stack_chk_guard`. Next, verify their old
+Bionic ABI/layouts and provide guest storage with tests; do not point them at
+function trampolines or host libc objects. Constructor enumeration/execution,
+stack/heap separation, and JNI remain outstanding.

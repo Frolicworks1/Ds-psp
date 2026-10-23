@@ -1,15 +1,12 @@
-/* Bounded execution probe of the actual guest bytes. All imports stop the probe. */
+/* Bounded execution of relocated guest bytes; unsupported imports stop. */
 #include "../src/cpu/armv6.h"
 #include "../src/runtime/arm_loader.h"
+#include "../src/runtime/reloc.h"
+#include "../src/runtime/imports.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-int ds_import_is_trampoline(uint32_t addr) { (void)addr; return 0; }
-int ds_import_call(uint32_t addr, struct DsArmv6Cpu *cpu) {
-    (void)addr; (void)cpu; return -1;
-}
 
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 4) {
@@ -19,6 +16,10 @@ int main(int argc, char **argv) {
     DsArmImage mapped;
     int rc=ds_arm_loader_load(argv[1],&mapped);
     if (rc) { fprintf(stderr,"loader error=%d\n",rc); return 1; }
+    ds_imports_init();
+    ds_imports_bind_image(&mapped);
+    rc = ds_arm_apply_relocations(argv[1], &mapped);
+    if (rc) { fprintf(stderr, "relocation error=%d\n", rc); ds_arm_loader_unload(&mapped); return 1; }
     uint32_t entry=mapped.entry;
     if (argc>=3) {
         char *end; errno=0;
@@ -41,7 +42,7 @@ int main(int argc, char **argv) {
     ds_armv6_reset(&cpu,entry);
     cpu.r[13]=mapped.heap_base+mapped.heap_size-16u;
     cpu.r[14]=0xfffffff0u;
-    printf("Unrelocated bounded probe; no JNI or imports implemented.\n");
+    printf("Relocated bounded probe; unsupported imports stop execution; no JNI.\n");
     printf("image_base=0x%08x image_bytes=%u entry=0x%08x heap_bytes=%u\n",
            mapped.image_base,mapped.image_size,entry,mapped.heap_size);
     int status=2;

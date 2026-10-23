@@ -15,10 +15,21 @@ foreach(group selftest fetch_bounds flags_only arithmetic_flags carry_arithmetic
 endforeach()
 
 # Optional local investigation; proprietary inputs are never required by CTest/CI.
-add_executable(probe_guest probe_guest.c ../src/cpu/armv6.c ../src/runtime/arm_loader.c)
+add_executable(probe_guest probe_guest.c ../src/cpu/armv6.c ../src/runtime/arm_loader.c
+    ../src/runtime/reloc.c ../src/runtime/imports.c host/log.c)
 target_include_directories(probe_guest PRIVATE host)
 target_compile_options(probe_guest PRIVATE -Wall -Wextra -Werror -Wpedantic)
 if(DSPSP_SANITIZE)
     target_compile_options(probe_guest PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(probe_guest PRIVATE -fsanitize=address,undefined)
 endif()
+
+add_executable(test_linker test_linker.c ../src/runtime/arm_loader.c
+    ../src/runtime/reloc.c ../src/runtime/imports.c host/log.c)
+target_include_directories(test_linker PRIVATE host)
+target_compile_options(test_linker PRIVATE -Wall -Wextra -Werror -Wpedantic)
+if(DSPSP_SANITIZE)
+    target_compile_options(test_linker PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(test_linker PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME linker_imports COMMAND test_linker)

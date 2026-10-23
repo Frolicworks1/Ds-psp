@@ -64,10 +64,10 @@ int main(void) {
         dspsp_log("ARM self-relocations=%d imports=%u", reloc_status, ds_import_resolve_count());
         /* Reserve the top of the guest arena as an ARM-compatible stack. */
         DsArmv6Cpu guest_cpu;
-        ds_armv6_reset(&guest_cpu, arm_image.image_base + arm_image.entry);
+        ds_armv6_reset(&guest_cpu, arm_image.entry);
         guest_cpu.r[13] = arm_image.heap_base + arm_image.heap_size - 16u;
         dspsp_log("guest stack=0x%08X entry=0x%08X", guest_cpu.r[13], guest_cpu.pc);
-        int guest_rc = ds_armv6_run(&guest_cpu, &(DsArmv6Image){
+        int guest_rc = reloc_status ? reloc_status : ds_armv6_run(&guest_cpu, &(DsArmv6Image){
             arm_image.image, arm_image.image_size + arm_image.heap_size, arm_image.image_base
         }, 1u);
         dspsp_log("guest entry probe rc=%d pc=0x%08X", guest_rc, guest_cpu.pc);

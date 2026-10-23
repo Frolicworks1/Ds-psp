@@ -33,7 +33,10 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
         memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
         eh.e_ident[EI_CLASS] != ELFCLASS32 ||
         eh.e_ident[EI_DATA] != ELFDATA2LSB ||
-        eh.e_machine != EM_ARM) {
+        eh.e_machine != EM_ARM || eh.e_version != EV_CURRENT ||
+        eh.e_ident[EI_VERSION] != EV_CURRENT ||
+        (eh.e_type != ET_DYN && eh.e_type != ET_EXEC) ||
+        eh.e_ehsize != sizeof(eh) || eh.e_phentsize != sizeof(Elf32_Phdr)) {
         sceIoClose(fd);
         return -3;
     }
@@ -46,6 +49,9 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
             sceIoClose(fd); return -4;
         }
         if (ph.p_type != PT_LOAD) continue;
+        if (ph.p_filesz > ph.p_memsz || ph.p_memsz > UINT32_MAX - ph.p_vaddr) {
+            sceIoClose(fd); return -5;
+        }
         ++loads;
         if (ph.p_vaddr < lo) lo = ph.p_vaddr;
         if (ph.p_vaddr + ph.p_memsz > hi) hi = ph.p_vaddr + ph.p_memsz;
@@ -57,7 +63,7 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
 
     uint32_t size = hi - lo;
     const uint32_t heap_size = 8u * 1024u * 1024u;
-    if (size > 0xffffffffu - heap_size) { sceIoClose(fd); return -6; }
+    if (hi > UINT32_MAX - heap_size) { sceIoClose(fd); return -6; }
     uint8_t *mem = (uint8_t *)malloc(size + heap_size);
     if (!mem) {
         sceIoClose(fd); return -6;
