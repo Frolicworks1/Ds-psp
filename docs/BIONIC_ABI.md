@@ -91,7 +91,9 @@ first-constructor probe returns to its sentinel after 1,640 successful steps,
 including cleanup registration. Its two mappings (16,781,312 and 16,777,216 bytes)
 still fail ENOMEM. Returning from this routine does not establish a usable heap,
 successful game initialization or correctness of all interpreter instructions.
-The other 207 constructors and JNI startup are still untested.
+The other 207 constructors and JNI startup are still untested. An explicit host
+experiment with an 18 MiB mapping pool now services the large allocation and
+returns after 1,584 steps; see the budget measurements below.
 
 ELF PLT stubs that load PC directly dispatch registered imports before instruction
 fetch; synthetic tests cover this path independently of the donor.
@@ -121,7 +123,7 @@ Bridge free/realloc and general memory mapping remain incomplete.
 
 `mmap` supports ARM32 arguments (the fd and offset are on the guest stack),
 PROT_READ|PROT_WRITE (3), MAP_PRIVATE|MAP_ANONYMOUS (0x22), fd=-1 and offset=0.
-Non-fixed address hints may be ignored. A 512-page ownership bitmap implements
+Non-fixed address hints may be ignored. A bounded ownership bitmap (up to 32 MiB for explicit experiments) implements
 first-fit contiguous allocation inside the dedicated 2 MiB pool. New mappings
 are zero-filled, including reused pages. `munmap` rounds lengths to pages,
 supports partial release and unmapped holes within this pool, and rejects ranges
@@ -135,7 +137,8 @@ does not yet enforce access faults in the flat interpreter memory model.
 The prior 6 MiB program-break pool is reduced to 4 MiB to retain the total 8 MiB
 arena; this is a diagnostic allocation budget change, not a PSP model guarantee.
 The next work includes larger-budget measurements, C++ cleanup registration and
-constructor enumeration. No successful donor mmap is recorded yet.
+constructor enumeration. Successful donor mmap is now recorded in the explicit
+18/32 MiB host experiments below; the default budget still exhausts.
 
 ## C++ cleanup registration
 
@@ -154,3 +157,41 @@ Synthetic tests cover both argument orders, Thumb callback addresses, DSO
 filtering, reverse ordering, exhaustion, reuse and reset. The reference contract
 is [Bionic atexit.c](https://android.googlesource.com/platform/bionic/+/android-4.0.1_r1/libc/stdlib/atexit.c)
 and the ARM C++ ABI's __aeabi_atexit argument order.
+
+## Measured memory budgets (first constructor only)
+
+`ds_arm_loader_load_with_mmap` accepts a page-aligned, nonzero mapping budget up
+to 32 MiB. The ordinary loader and PSP main still use the original 2 MiB mapping
+pool. Host probe syntax adds an optional final mapping budget in MiB:
+
+```sh
+build-host/probe_guest /path/to/libDeadSpace.so 0x27e72c 100000 18
+```
+
+| Mapping pool | Total guest image + arena | Peak live mappings | Calls / ENOMEM failures | Steps to return |
+| --- | ---: | ---: | ---: | ---: |
+| 2 MiB (default) | 13,508,608 bytes | 0 | 2 / 2 | 1,640 |
+| 18 MiB (host experiment) | 30,285,824 bytes | 16,781,312 bytes | 1 / 0 | 1,584 |
+| 32 MiB (host experiment) | 44,965,888 bytes | 16,781,312 bytes | 1 / 0 | 1,584 |
+
+All three traces use the unchanged recorded donor. Bridge allocation use is
+1,616 bytes and program-break use is zero at this checkpoint. Peak mappings count
+page-rounded live allocations, not bytes actually touched. Total guest bytes are
+allocated and zeroed by the loader; they exclude host/PSP runtime overhead,
+renderer buffers, future assets, audio and thread stacks. These results are not
+RSS measurements, performance measurements or a PSP model compatibility claim.
+The 18 MiB experiment removes an artificial allocation failure in the first
+constructor; it does not validate all initialization or gameplay.
+
+Telemetry reports mapping call count, errno-return failures, largest request,
+current live mapping bytes and peak mapping bytes. Unsupported operations stop
+execution and are not counted as errno-return failures. Partial unmapping and
+repeated unmapping of holes do not underflow live-byte accounting. Counters reset
+on initialization or binding a different image.
+
+Next: retain one image while executing the complete constructor list, measure
+peak use there, then consider sharing unused program-break capacity with mapping
+storage or reducing reservations. Do not infer that unused space at this one
+checkpoint stays unused during gameplay. The supplied GTA PBP's MEMSIZE=1 and
+pool/streaming strings are reference clues only; no matching source was verified,
+so no allocator technique is attributed to that executable.

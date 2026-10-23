@@ -134,6 +134,15 @@ int main(void) {
     CHECK(loaded.mmap_base+loaded.mmap_size==loaded.stack_base);
     CHECK(loaded.stack_base+loaded.stack_size==loaded.heap_base+loaded.heap_size);
     CHECK(loaded.brk_used==0 && loaded.heap_used==0);
+    CHECK(loaded.mmap_size==2u*1024u*1024u && loaded.heap_size==8u*1024u*1024u);
+    ds_arm_loader_unload(&loaded);
+    CHECK(ds_arm_loader_load_with_mmap(path,&loaded,4097)==-10);
+    CHECK(!loaded.image);
+    CHECK(ds_arm_loader_load_with_mmap(path,&loaded,0)==-10);
+    CHECK(ds_arm_loader_load_with_mmap(path,&loaded,DS_ARM_MAX_MMAP_BYTES+4096)==-10);
+    CHECK(ds_arm_loader_load_with_mmap(path,&loaded,18u*1024u*1024u)==0);
+    CHECK(loaded.mmap_size==18u*1024u*1024u && loaded.heap_size==24u*1024u*1024u);
+    CHECK(loaded.mmap_base+loaded.mmap_size==loaded.stack_base);
     ds_arm_loader_unload(&loaded);
     Elf32_Phdr ph={.p_type=PT_LOAD,.p_vaddr=0xfffffff0,.p_memsz=0x100}; put(sizeof(Elf32_Ehdr),&ph,sizeof(ph));
     CHECK(apply(&im)==-7); CHECK(ds_arm_loader_load(path,&loaded)==-5);

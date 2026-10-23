@@ -22,8 +22,13 @@ const uint8_t *ds_arm_loader_ptr(const DsArmImage *image, uint32_t vaddr) {
 }
 
 int ds_arm_loader_load(const char *path, DsArmImage *out) {
+    return ds_arm_loader_load_with_mmap(path, out, 2u * 1024u * 1024u);
+}
+
+int ds_arm_loader_load_with_mmap(const char *path, DsArmImage *out, uint32_t mmap_bytes) {
     if (!path || !out) return -1;
     memset(out, 0, sizeof(*out));
+    if (!mmap_bytes || mmap_bytes > DS_ARM_MAX_MMAP_BYTES || (mmap_bytes & 4095u)) return -10;
 
     SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
     if (fd < 0) return -2;
@@ -65,7 +70,7 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
     if (hi > UINT32_MAX - 4095u) { sceIoClose(fd); return -6; }
     hi = (hi + 4095u) & ~4095u;
     uint32_t size = hi - lo;
-    const uint32_t heap_size = 8u * 1024u * 1024u;
+    const uint32_t heap_size = 6u * 1024u * 1024u + mmap_bytes;
     if (hi > UINT32_MAX - heap_size) { sceIoClose(fd); return -6; }
     uint8_t *mem = (uint8_t *)malloc(size + heap_size);
     if (!mem) {
@@ -104,7 +109,7 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
     out->brk_base = out->heap_base + out->bridge_size;
     out->brk_size = 4u * 1024u * 1024u;
     out->mmap_base = out->brk_base + out->brk_size;
-    out->mmap_size = 2u * 1024u * 1024u;
+    out->mmap_size = mmap_bytes;
     out->stack_base = out->mmap_base + out->mmap_size;
     out->stack_size = 1024u * 1024u;
     return 0;

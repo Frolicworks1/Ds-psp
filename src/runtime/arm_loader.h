@@ -19,7 +19,10 @@ typedef struct {
     uint32_t mmap_base, mmap_size;
 } DsArmImage;
 
+#define DS_ARM_MAX_MMAP_BYTES (32u * 1024u * 1024u)
 int ds_arm_loader_load(const char *path, DsArmImage *out);
+/* Explicit diagnostic budget; default loader uses 2 MiB. Must be page aligned. */
+int ds_arm_loader_load_with_mmap(const char *path, DsArmImage *out, uint32_t mmap_bytes);
 void ds_arm_loader_unload(DsArmImage *image);
 const uint8_t *ds_arm_loader_ptr(const DsArmImage *image, uint32_t vaddr);
 

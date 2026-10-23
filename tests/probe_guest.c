@@ -9,12 +9,19 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-    if (argc < 2 || argc > 4) {
-        fprintf(stderr,"Usage: %s <guest.so> [entry-virtual-address [instruction-limit]]\n",argv[0]);
+    if (argc < 2 || argc > 5) {
+        fprintf(stderr,"Usage: %s <guest.so> [entry-virtual-address [instruction-limit [mmap-MiB]]]\n",argv[0]);
         return 64;
     }
     DsArmImage mapped;
-    int rc=ds_arm_loader_load(argv[1],&mapped);
+    uint32_t mmap_bytes=2u*1024u*1024u;
+    if (argc==5) {
+        char *end; errno=0;
+        unsigned long mib=strtoul(argv[4],&end,0);
+        if (errno || !argv[4][0] || *end || !mib || mib>32) return 64;
+        mmap_bytes=(uint32_t)mib*1024u*1024u;
+    }
+    int rc=ds_arm_loader_load_with_mmap(argv[1],&mapped,mmap_bytes);
     if (rc) { fprintf(stderr,"loader error=%d\n",rc); return 1; }
     ds_imports_init();
     ds_imports_bind_image(&mapped);
@@ -30,7 +37,7 @@ int main(int argc, char **argv) {
         entry=(uint32_t)value;
     }
     unsigned long limit=32;
-    if (argc==4) {
+    if (argc>=4) {
         char *end; errno=0;
         limit=strtoul(argv[3],&end,0);
         if (errno || !argv[3][0] || *end || limit==0 || limit>100000) {
@@ -62,6 +69,11 @@ int main(int argc, char **argv) {
         }
         if (i+1==limit) printf("STOP bounded instruction limit reached.\n");
     }
+    DsGuestMemoryStats stats=ds_import_memory_stats();
+    printf("MEMORY mapped_total=%u bridge_used=%u brk_used=%u mmap_budget=%u mmap_live=%u mmap_peak=%u largest_request=%u calls=%u failures=%u steps=%u\n",
+        memory.size,mapped.heap_used,mapped.brk_used,mapped.mmap_size,
+        stats.mmap_live_bytes,stats.mmap_peak_bytes,stats.mmap_largest_request,
+        stats.mmap_calls,stats.mmap_failures,cpu.steps);
     ds_arm_loader_unload(&mapped);
     return status;
 }

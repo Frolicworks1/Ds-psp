@@ -19,6 +19,11 @@ typedef struct {
 /* Remove newest matching registration before guest execution (dso=0: any).
  * Returns 1 for a callback, 0 if empty, -1 for a null output. Does not execute it. */
 int ds_import_take_destructor(uint32_t dso, DsGuestDestructor *out);
+typedef struct {
+    uint32_t mmap_live_bytes, mmap_peak_bytes, mmap_largest_request;
+    uint32_t mmap_calls, mmap_failures;
+} DsGuestMemoryStats;
+DsGuestMemoryStats ds_import_memory_stats(void);
 unsigned ds_import_resolve_count(void);
 int ds_import_is_trampoline(uint32_t guest_addr);
 int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu);

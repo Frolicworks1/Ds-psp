@@ -14,8 +14,9 @@ static DsArmImage *g_image;
 static uint32_t g_ctype_objects[3];
 static uint32_t g_stdio;
 static uint32_t g_errno;
-#define MMAP_PAGES 512u
+#define MMAP_PAGES (DS_ARM_MAX_MMAP_BYTES / 4096u)
 static uint8_t g_mapped[MMAP_PAGES];
+static DsGuestMemoryStats g_memory_stats;
 static uint32_t g_globals[3];
 #define DESTRUCTOR_MAX 1024u
 static DsGuestDestructor g_destructors[DESTRUCTOR_MAX];
@@ -33,6 +34,7 @@ void ds_imports_init(void) {
     g_stdio = 0;
     g_errno = 0;
     memset(g_mapped, 0, sizeof(g_mapped));
+    memset(&g_memory_stats, 0, sizeof(g_memory_stats));
     memset(g_globals, 0, sizeof(g_globals));
     memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
 }
@@ -59,6 +61,7 @@ void ds_imports_bind_image(DsArmImage *image) {
         g_stdio = 0;
         g_errno = 0;
         memset(g_mapped, 0, sizeof(g_mapped));
+        memset(&g_memory_stats, 0, sizeof(g_memory_stats));
         memset(g_globals, 0, sizeof(g_globals));
     }
     g_image = image;
@@ -111,6 +114,11 @@ static int mapping_call(const char *name, struct DsArmv6Cpu *cpu) {
     if (capacity > MMAP_PAGES || (g_image->mmap_base & 4095u) ||
         (g_image->mmap_size & 4095u) ||
         !guest_range(g_image->mmap_base, g_image->mmap_size)) return -31;
+    int mapping = !strcmp(name, "mmap");
+    if (mapping) {
+        ++g_memory_stats.mmap_calls;
+        if (size > g_memory_stats.mmap_largest_request) g_memory_stats.mmap_largest_request = size;
+    }
     if (!size) error = 22;
     else if (!strcmp(name, "mmap")) {
         const uint8_t *args = guest_range(cpu->r[13], 8);
@@ -132,6 +140,9 @@ static int mapping_call(const char *name, struct DsArmv6Cpu *cpu) {
             uint32_t target = g_image->mmap_base + start * 4096u;
             memset(guest_range(target, pages * 4096u), 0, pages * 4096u);
             memset(g_mapped + start, 1, pages);
+            g_memory_stats.mmap_live_bytes += pages * 4096u;
+            if (g_memory_stats.mmap_live_bytes > g_memory_stats.mmap_peak_bytes)
+                g_memory_stats.mmap_peak_bytes = g_memory_stats.mmap_live_bytes;
             cpu->r[0] = target;
             dspsp_log("guest mmap bytes=%u rounded=%u address=%08x", size, pages * 4096u, target);
         }
@@ -142,11 +153,14 @@ static int mapping_call(const char *name, struct DsArmv6Cpu *cpu) {
                  (uint64_t)g_image->mmap_base + g_image->mmap_size) return -32;
         else {
             unsigned start = (addr - g_image->mmap_base) / 4096u;
+            for (unsigned i = start; i < start + pages; ++i)
+                if (g_mapped[i]) g_memory_stats.mmap_live_bytes -= 4096u;
             memset(g_mapped + start, 0, pages);
             cpu->r[0] = 0;
         }
     }
     if (error) {
+        if (mapping) ++g_memory_stats.mmap_failures;
         dspsp_log("guest %s failed bytes=%u errno=%u", name, size, error);
         store32(guest_range(g_errno, 4), error);
         cpu->r[0] = UINT32_MAX;
@@ -350,6 +364,8 @@ int ds_import_take_destructor(uint32_t dso, DsGuestDestructor *out) {
     }
     return 0;
 }
+
+DsGuestMemoryStats ds_import_memory_stats(void) { return g_memory_stats; }
 
 unsigned ds_import_resolve_count(void) {
     return g_count;
