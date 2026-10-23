@@ -162,6 +162,21 @@ int main(void) {
   strcpy((char*)mem+1280,"()Z");CHECK(call(33,cls,0x1480,0x1500)==-32);
   CHECK(!call(23,cls,0,0));
  }
+ /* JNI UTF strings used by Java/platform metadata queries. */
+ strcpy((char*)mem+1024,"java/lang/String");
+ strcpy((char*)mem+1536,"Device-Model");
+ CHECK(!call(6,0x1400,0,0));uint32_t stringClass=cpu.r[0];
+ CHECK(!call(167,0x1600,0,0));uint32_t stringRef=cpu.r[0];
+ CHECK(stringRef && !call(168,stringRef,0,0) && cpu.r[0]==11);
+ CHECK(!call(169,stringRef,0x1640,0));uint32_t stringChars=cpu.r[0];
+ CHECK(stringChars && !strcmp((char*)mem+stringChars-0x1000,"Device-Model"));
+ CHECK(read32(0x1640)==1);
+ CHECK(!call(170,stringRef,stringChars,0) && cpu.r[0]==0);
+ CHECK(call(170,stringRef,stringChars+1,0)==-31);
+ CHECK(!call(31,stringRef,0,0));uint32_t actualStringClass=cpu.r[0];
+ CHECK(!call(24,stringClass,actualStringClass,0) && cpu.r[0]);
+ CHECK(!call(23,actualStringClass,0,0) && !call(23,stringRef,0,0));
+ CHECK(!call(23,stringClass,0,0));
  CHECK(!call(22,manager,0,0));
  CHECK(!rmdir(assetRoot));
  CHECK(!call(23,receiver,0,0)); /* singleton survives handle deletion */
