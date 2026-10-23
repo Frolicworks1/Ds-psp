@@ -322,16 +322,16 @@ These implement single-thread semantics only; spawning threads is still gated.
 
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
-NativeOnDrawFrame passes EAIO metadata lookup and stops at
-FindClass("com/ea/blast/MainActivity"). Before initialization completes,
+NativeOnDrawFrame passes EAIO/MainActivity metadata lookup and stops at
+CallStaticObjectMethodV for MainActivity.GetInstance (JNI slot 115). Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
 
 
 ### JNI reference and EAIO metadata support
 
 The bridge reserves 64 opaque guest reference slots, independent from object
-identity. FindClass currently recognizes only `com/ea/EAIO/EAIO`, confirmed in the
-supplied APK with no `<clinit>` static initializer. Each lookup returns a local
+identity. FindClass recognizes `com/ea/EAIO/EAIO` (no static initializer) and
+`com/ea/blast/MainActivity`. Each lookup returns a local
 reference to its class identity. NewGlobalRef/NewLocalRef create independent
 handles; deleting a reference invalidates only that handle. Invalid handles and
 wrong-kind deletions stop; null reference copying/deletion follows JNI semantics.
@@ -345,7 +345,22 @@ GetStaticMethodID matches the exact EAIO class, name and descriptor for native
 and separate from object references. This is method metadata only: invoking those
 methods remains unsupported until the asset-manager/native-call bridge exists.
 Unknown classes/method signatures trap; no dummy asset manager or successful
-file operation is returned. First-draw progress is 90 interpreter steps before
-MainActivity class lookup, 10,775 total including constructors and lifecycle.
-The JNI arena reservation increases total bridge use from 2,592 to 2,856 bytes;
+file operation is returned. First-draw progress is 116 interpreter steps before
+GetInstance invocation, 10,801 total including constructors and lifecycle.
+The JNI arena reservation now uses 2,864 total bridge bytes;
 the total mapped arena remains 30,285,824 bytes with zero allocation failures.
+
+### MainActivity metadata evidence
+
+The supplied APK (SHA256 `00c0a997489f81ab18c2c5e6849e7f2f516e527f8b4c4e13e502f130f8a86bfe`)
+contains MainActivity `<clinit>` at DEX code offset `0xc614`: `const/4 v0,0`,
+`sput-boolean v0,activityExists`, `return-void`. Its only effect is the default
+false value; it does not create an activity. `GetInstance` at `0xc6a8` reads
+static `instance`. Java `onCreate` assigns that field before NativeOnCreate.
+The host native callback alone does not perform this Java lifecycle.
+
+Exact static `GetInstance()Lcom/ea/blast/MainActivity;` and inherited instance
+`getAssets()Landroid/content/res/AssetManager;` metadata have distinct IDs.
+Static/instance mismatches, incorrect declaring class and return descriptors
+stop. Invocation remains unsupported pending explicit lifecycle and asset
+semantics. The bridge does not execute Android superclass initialization.

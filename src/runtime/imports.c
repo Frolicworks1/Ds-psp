@@ -20,6 +20,8 @@ static uint32_t g_stdio;
 static uint32_t g_errno;
 static uint32_t g_jvm,g_jenv,g_jrefs;
 #define JNI_REF_MAX 64u
+#define JNI_METHOD_MAX 4u
+enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY };
 /* Object identity is distinct from the lifetime of each local/global handle. */
 static struct { unsigned object,global; } g_jref[JNI_REF_MAX];
 #define JNI_TRAMP_BASE 0xf1000000u
@@ -125,7 +127,7 @@ int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env) {
     *vm=*env=0;
     if (!g_jvm) {
         unsigned table_bytes=(2+JNI_VM_SLOTS+JNI_ENV_SLOTS)*4;
-        unsigned bytes=table_bytes+(JNI_REF_MAX+2)*4;
+        unsigned bytes=table_bytes+(JNI_REF_MAX+JNI_METHOD_MAX)*4;
         uint32_t addr=guest_alloc(bytes);
         if (!addr) return -1;
         uint8_t *p=guest_range(addr,bytes); memset(p,0,bytes);
@@ -172,21 +174,27 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
         if (slot==4) cpu->r[0]=0x10006; /* GetVersion */
         else if (slot==6) { /* FindClass: only verified, initialized metadata. */
             const char *name=guest_string(cpu->r[1]);if (!name) return -31;
-            if (strcmp(name,"com/ea/EAIO/EAIO")) {
-                dspsp_log("unsupported JNI class: %s",name);return -32;
-            }
-            /* This APK's EAIO class declares no <clinit>. Its native method
-             * bodies are separate from this class-reference operation. */
-            int rc=jni_new_ref(1,0,&cpu->r[0]);if (rc) return rc;
-        } else if (slot==113) { /* GetStaticMethodID: exact class/name/signature */
+            unsigned object;
+            if (!strcmp(name,"com/ea/EAIO/EAIO")) object=JNI_CLASS_EAIO;
+            else if (!strcmp(name,"com/ea/blast/MainActivity")) object=JNI_CLASS_ACTIVITY;
+            else {dspsp_log("unsupported JNI class: %s",name);return -32;}
+            /* EAIO has no <clinit>. MainActivity's only initializer sets
+             * activityExists=false, its default value. This creates class
+             * metadata, not an Activity instance or Android lifecycle. */
+            int rc=jni_new_ref(object,0,&cpu->r[0]);if (rc) return rc;
+        } else if (slot==113 || slot==33) { /* Static / instance method lookup */
             int i=jni_ref_index(cpu->r[1]);
             const char *name=guest_string(cpu->r[2]),*signature=guest_string(cpu->r[3]);
             if(i<0 || !name || !signature)return -31;
             unsigned method;
-            if(g_jref[i].object==1 && !strcmp(name,"Startup") &&
+            if(slot==113 && g_jref[i].object==JNI_CLASS_EAIO && !strcmp(name,"Startup") &&
                 !strcmp(signature,"(Landroid/content/res/AssetManager;)V")) method=0;
-            else if(g_jref[i].object==1 && !strcmp(name,"Shutdown") && !strcmp(signature,"()V")) method=1;
-            else {dspsp_log("unsupported JNI static method: %s %s",name,signature);return -32;}
+            else if(slot==113 && g_jref[i].object==JNI_CLASS_EAIO && !strcmp(name,"Shutdown") && !strcmp(signature,"()V")) method=1;
+            else if(slot==113 && g_jref[i].object==JNI_CLASS_ACTIVITY && !strcmp(name,"GetInstance") &&
+                !strcmp(signature,"()Lcom/ea/blast/MainActivity;")) method=2;
+            else if(slot==33 && g_jref[i].object==JNI_CLASS_ACTIVITY && !strcmp(name,"getAssets") &&
+                !strcmp(signature,"()Landroid/content/res/AssetManager;")) method=3;
+            else {dspsp_log("unsupported JNI method slot=%u: %s %s",slot,name,signature);return -32;}
             cpu->r[0]=g_jrefs+(JNI_REF_MAX+method)*4;
         } else if (slot==232) { /* GetObjectRefType, invalid/null -> JNIInvalidRefType */
             int i=jni_ref_index(cpu->r[1]);

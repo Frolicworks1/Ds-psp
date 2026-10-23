@@ -55,6 +55,24 @@ int main(void) {
  CHECK(call(6,0x3000,0,0)==-31);
  memset(mem+8190,'x',2); /* unterminated to end of mapped space */
  CHECK(call(6,0x2ffe,0,0)==-31);
+ strcpy((char*)mem+384,"com/ea/blast/MainActivity");
+ strcpy((char*)mem+448,"GetInstance");strcpy((char*)mem+512,"()Lcom/ea/blast/MainActivity;");
+ strcpy((char*)mem+576,"getAssets");strcpy((char*)mem+640,"()Landroid/content/res/AssetManager;");
+ CHECK(!call(6,0x1180,0,0));uint32_t activity=cpu.r[0];
+ CHECK(!call(6,0x1000,0,0));uint32_t eaio=cpu.r[0];
+ CHECK(!call(24,activity,eaio,0) && !cpu.r[0]);
+ CHECK(!call(113,activity,0x11c0,0x1200));uint32_t instanceMethod=cpu.r[0];
+ CHECK(instanceMethod!=startup && instanceMethod!=shutdown);
+ CHECK(!call(33,activity,0x1240,0x1280));uint32_t assetsMethod=cpu.r[0];
+ CHECK(assetsMethod!=instanceMethod && assetsMethod!=startup && assetsMethod!=shutdown);
+ CHECK(call(113,activity,0x1240,0x1280)==-32); /* getAssets is not static */
+ CHECK(call(33,activity,0x11c0,0x1200)==-32); /* GetInstance is static */
+ CHECK(call(113,eaio,0x11c0,0x1200)==-32); /* wrong declaring class */
+ CHECK(call(33,eaio,0x1240,0x1280)==-32);
+ CHECK(call(113,activity,0x11c0,0x1280)==-32); /* wrong return type */
+ CHECK(call(114,activity,instanceMethod,0)==-32); /* no fabricated instance */
+ CHECK(call(21,assetsMethod,0,0)==-31);
+ CHECK(!call(23,activity,0,0) && !call(23,eaio,0,0));
  uint32_t refs[64];
  for(unsigned i=0;i<64;++i){CHECK(!call(6,0x1000,0,0));refs[i]=cpu.r[0];}
  CHECK(call(6,0x1000,0,0)==-32 && im.heap_used==used);
