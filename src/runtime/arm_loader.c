@@ -47,11 +47,30 @@ int ds_arm_loader_load_with_mmap(const char *path, DsArmImage *out, uint32_t mma
     }
 
     uint32_t lo = 0xffffffffu, hi = 0, loads = 0;
+    uint32_t init = 0, array = 0, array_bytes = 0;
+    unsigned dynamic_count = 0, array_tags = 0;
     for (unsigned i = 0; i < eh.e_phnum; ++i) {
         Elf32_Phdr ph;
         if (read_at(fd, (SceOff)eh.e_phoff + (SceOff)i * eh.e_phentsize,
                     &ph, sizeof(ph)) < 0) {
             sceIoClose(fd); return -4;
+        }
+        if (ph.p_type == PT_DYNAMIC) {
+            if (++dynamic_count > 1 || ph.p_filesz % sizeof(Elf32_Dyn)) {
+                sceIoClose(fd); return -11;
+            }
+            int terminated = 0;
+            for (uint32_t off = 0; off < ph.p_filesz; off += sizeof(Elf32_Dyn)) {
+                Elf32_Dyn d;
+                if (read_at(fd, (SceOff)ph.p_offset + off, &d, sizeof(d))) {
+                    sceIoClose(fd); return -11;
+                }
+                if (d.d_tag == DT_NULL) { terminated = 1; break; }
+                if (d.d_tag == DT_INIT) init = d.d_un.d_ptr;
+                if (d.d_tag == DT_INIT_ARRAY) { array = d.d_un.d_ptr; array_tags |= 1; }
+                if (d.d_tag == DT_INIT_ARRAYSZ) { array_bytes = d.d_un.d_val; array_tags |= 2; }
+            }
+            if (!terminated) { sceIoClose(fd); return -11; }
         }
         if (ph.p_type != PT_LOAD) continue;
         if (ph.p_filesz > ph.p_memsz || ph.p_memsz > UINT32_MAX - ph.p_vaddr) {
@@ -64,6 +83,13 @@ int ds_arm_loader_load_with_mmap(const char *path, DsArmImage *out, uint32_t mma
 
     if (!loads || lo == 0xffffffffu || hi <= lo) {
         sceIoClose(fd); return -5;
+    }
+
+    /* Validate against the original ELF span, excluding appended arena/padding. */
+    if ((array_tags && array_tags != 3) || (array_bytes & 3u) ||
+        (array_bytes && ((array & 3u) || array < lo || array > hi || array_bytes > hi - array)) ||
+        (init && ((init & ~1u) < lo || (init & ~1u) >= hi))) {
+        sceIoClose(fd); return -11;
     }
 
     /* Page-align the arena so the guest allocator receives an aligned break. */
@@ -101,6 +127,9 @@ int ds_arm_loader_load_with_mmap(const char *path, DsArmImage *out, uint32_t mma
     out->image_base = lo;
     out->image_size = size;
     out->entry = eh.e_entry;
+    out->init_function = init;
+    out->init_array = array;
+    out->init_count = array_bytes / 4;
     out->load_segments = loads;
     out->heap_base = lo + size;
     out->heap_size = heap_size;

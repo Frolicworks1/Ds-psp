@@ -17,6 +17,7 @@ typedef struct {
     uint32_t brk_base, brk_size, brk_used;
     uint32_t stack_base, stack_size;
     uint32_t mmap_base, mmap_size;
+    uint32_t init_function, init_array, init_count;
 } DsArmImage;
 
 #define DS_ARM_MAX_MMAP_BYTES (32u * 1024u * 1024u)

@@ -82,3 +82,7 @@ if(DSPSP_SANITIZE)
     target_link_options(test_atexit PRIVATE -fsanitize=address,undefined)
 endif()
 add_test(NAME atexit_imports COMMAND test_atexit)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME initializer_sequence COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_initializers.py $<TARGET_FILE:probe_guest>)

@@ -91,7 +91,9 @@ first-constructor probe returns to its sentinel after 1,640 successful steps,
 including cleanup registration. Its two mappings (16,781,312 and 16,777,216 bytes)
 still fail ENOMEM. Returning from this routine does not establish a usable heap,
 successful game initialization or correctness of all interpreter instructions.
-The other 207 constructors and JNI startup are still untested. An explicit host
+The persistent sequence now returns from constructors 0–25 and stops in
+constructor 26 on unsupported VFP opcode 0xed2d8b06 at PC 0x000f956c. The
+remaining 181 entries and JNI startup are untested. An explicit host
 experiment with an 18 MiB mapping pool now services the large allocation and
 returns after 1,584 steps; see the budget measurements below.
 
@@ -189,9 +191,38 @@ execution and are not counted as errno-return failures. Partial unmapping and
 repeated unmapping of holes do not underflow live-byte accounting. Counters reset
 on initialization or binding a different image.
 
-Next: retain one image while executing the complete constructor list, measure
-peak use there, then consider sharing unused program-break capacity with mapping
-storage or reducing reservations. Do not infer that unused space at this one
+The persistent sequence has now reached constructor 26 without further mapping
+requests. Next: implement independently tested VFP execution and continue the
+sequence before reducing reservations or sharing unused capacity. Do not infer that unused space at this one
 checkpoint stays unused during gameplay. The supplied GTA PBP's MEMSIZE=1 and
 pool/streaming strings are reference clues only; no matching source was verified,
 so no allocator technique is attributed to that executable.
+
+## Persistent initializer probe
+
+```sh
+build-host/probe_guest /path/to/libDeadSpace.so constructors 100000 18
+```
+
+The loader reads DT_INIT and DT_INIT_ARRAY metadata, validates size/alignment
+and image-span bounds, and exposes the array address/count. The probe reads array
+entries **after relocation**, calls DT_INIT first when present, and visits array
+entries in order. Zero and UINT32_MAX entries are explicitly counted as skipped.
+Memory, allocator ownership, errno and destructor registrations persist between
+calls; each routine receives a fresh CPU context and reserved stack top. The
+instruction budget is per routine. Any fault, invalid target or budget exhaustion
+stops the sequence; later entries are never treated as tested. An exact-budget
+return to the sentinel is recognized. This diagnostic runner does not perform JNI
+startup, dependency constructors, full process argument setup or shutdown.
+
+Independent ELF fixtures verify init-before-array order and persistent memory:
+each routine checks a counter written by its predecessor before updating it.
+Other fixtures test sentinel entries, invalid metadata/targets, failure stopping
+and the exact instruction-limit boundary. Python 3 is required for this host test.
+
+Exact donor result with an 18 MiB mapping pool: 208 total entries, 27 attempted,
+26 returned, zero skipped, 181 pending; 1,835 successful steps. Constructor index
+26 starts at 0x000f9568 and stops at 0x000f956c (opcode 0xed2d8b06, VFP register
+stack transfer). Live/peak mapped bytes remain 16,781,312, bridge use 1,616,
+program-break use zero, total mapped image+arena 30,285,824. No allocation failures
+occurred. These are partial-initialization measurements, not final memory bounds.

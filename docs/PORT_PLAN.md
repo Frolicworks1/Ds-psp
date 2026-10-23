@@ -32,7 +32,7 @@ binaries/assets and personal saves out of commits.
 | Stage | Work | Acceptance gate | Current state |
 | --- | --- | --- | --- |
 | M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and 13 CPU groups pass locally; physical/emulator boot not yet verified |
-| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; first constructor returns; 18 MiB host mapping budget removes ENOMEM; 207 constructors untested |
+| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; 26 constructors return in persistent host probe; constructor 27 stops at VFP; 181 remain pending |
 | M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter only; VFP and many instructions remain absent |
 | M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Unimplemented beyond a few memory/string imports |
 | M4: first genuine frame | Map exercised GLES 1.x functions to GU/GUM; handle state, geometry, textures, formats and render targets | Original game produces a recognizable menu/loading frame; captures and logs confirm real guest rendering; no fabricated image | Not reached |
@@ -119,16 +119,15 @@ import rejection, memory/string bounds and stable import ownership. This is not
 a complete hostile-ELF validator: overlapping segments/tables and complete dynamic
 symbol counts still need validation before M1 is complete.
 
-The exact donor now completes relocation and begins its first constructor.
-After 1,640 successful steps the first constructor returns. Its two roughly
-16 MiB mapping requests fail ENOMEM at the default 2 MiB budget. An explicit
-18 MiB host budget successfully services one 16,781,312-byte mapping and returns
-after 1,584 steps. This is not a complete allocator or gameplay validation. All seven data
-symbols have guest storage; standard output/error have a bounded log adapter.
-See [Bionic ABI](BIONIC_ABI.md) for verified layouts and service limitations.
-Mutex attributes and uncontended single-thread locking now have ABI/state tests.
-The program break now has a separate allocation pool and the stack has a reserved
-range. Anonymous mmap/munmap now have tested mapping ownership within a 2 MiB
-pool. Cleanup registration is retained in a tested bounded registry; shutdown
-execution remains unsupported. Next: investigate the larger memory requirement,
-add memory-access guards, and account for all 208 constructors. JNI startup and complete ELF validation remain outstanding.
+The exact donor completes relocation. The persistent host probe with an 18 MiB
+mapping pool returns from the first 26 constructors and stops in constructor
+index 26 at PC 0x000f956c, opcode 0xed2d8b06 (VFP stack transfer). It accounts for
+all 208 entries: 27 attempted, 26 returned, zero skipped, 181 pending. There are no
+allocation failures on this path; peak live mappings remain 16,781,312 bytes.
+The default 2 MiB PSP mapping budget remains unchanged and is insufficient for
+the donor's initial large request. Host results do not establish device readiness.
+
+See [Bionic ABI](BIONIC_ABI.md) for the runner and memory measurements. Next:
+implement independently tested VFP state/transfers and required arithmetic,
+continue the constructor sequence, add memory-access guards and measure the full
+startup budget. JNI, shutdown execution and complete ELF validation remain open.
