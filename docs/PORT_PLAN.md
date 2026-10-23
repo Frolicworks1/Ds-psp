@@ -32,8 +32,8 @@ binaries/assets and personal saves out of commits.
 | Stage | Work | Acceptance gate | Current state |
 | --- | --- | --- | --- |
 | M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and 13 CPU groups pass locally; physical/emulator boot not yet verified |
-| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; 59 constructors return; constructor 60 stops at clock; 148 remain pending |
-| M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter; VFP transfers tested against Unicorn, arithmetic and other instructions absent |
+| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; all 208 constructors return in the host probe; device/JNI startup and full ELF validation remain open |
+| M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter; required scalar VFP arithmetic/conversions, long multiply and transfers tested against Unicorn; other instructions remain gated |
 | M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Unimplemented beyond a few memory/string imports |
 | M4: first genuine frame | Map exercised GLES 1.x functions to GU/GUM; handle state, geometry, textures, formats and render targets | Original game produces a recognizable menu/loading frame; captures and logs confirm real guest rendering; no fabricated image | Not reached |
 | M5: interactive menu | PSP analog/buttons mapped to original events; lifecycle/focus, audio decoding/output and timing | Menu navigation, audible output, pause/resume and input work repeatedly; teardown is clean | Not reached |
@@ -120,14 +120,18 @@ a complete hostile-ELF validator: overlapping segments/tables and complete dynam
 symbol counts still need validation before M1 is complete.
 
 The exact donor completes relocation. The persistent host probe with an 18 MiB
-mapping pool returns from the first 59 constructors and stops in constructor
-index 59 at import trampoline PC 0xf000037c (`clock`). It accounts for
-all 208 entries: 60 attempted, 59 returned, zero skipped, 148 pending. There are no
-allocation failures on this path; peak live mappings remain 16,781,312 bytes.
+mapping pool returns from all 208 constructors: 208 attempted, 208 returned,
+zero skipped, zero pending, 8,264 successful steps. No allocation failures occur;
+peak live mappings remain 16,781,312 bytes. Total mapped image+arena is 30,285,824
+bytes, excluding host/PSP runtime, display, audio and assets.
+
 The default 2 MiB PSP mapping budget remains unchanged and is insufficient for
-the donor's initial large request. Host results do not establish device readiness.
+the donor's initial large request. The diagnostic EBOOT still only probes one
+entry instruction; it does not run this constructor sequence. Host results do
+not establish device readiness or a playable beta.
 
 See [Bionic ABI](BIONIC_ABI.md) for the runner and memory measurements. Next:
-implement Bionic `clock` semantics and required VFP arithmetic,
-continue the constructor sequence, add memory-access guards and measure the full
-startup budget. JNI, shutdown execution and complete ELF validation remain open.
+connect JNI/lifecycle startup, implement required asset access, add memory-access
+guards and measure the full startup budget. Shutdown execution and complete ELF
+validation remain open. Keep the original Diagnostic Test 1 available for the
+user's pending PPSSPP boot test.

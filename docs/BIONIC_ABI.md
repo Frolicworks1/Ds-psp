@@ -91,9 +91,8 @@ first-constructor probe returns to its sentinel after 1,640 successful steps,
 including cleanup registration. Its two mappings (16,781,312 and 16,777,216 bytes)
 still fail ENOMEM. Returning from this routine does not establish a usable heap,
 successful game initialization or correctness of all interpreter instructions.
-The persistent sequence now returns from constructors 0–58 and stops in
-constructor 59 on unsupported `clock` at import trampoline PC 0xf000037c. The
-remaining 148 entries and JNI startup are untested. An explicit host
+The persistent host sequence now returns from all 208 constructors, with none
+skipped. JNI startup remains untested. An explicit host
 experiment with an 18 MiB mapping pool now services the large allocation and
 returns after 1,584 steps; see the budget measurements below.
 
@@ -191,9 +190,9 @@ execution and are not counted as errno-return failures. Partial unmapping and
 repeated unmapping of holes do not underflow live-byte accounting. Counters reset
 on initialization or binding a different image.
 
-The persistent sequence has now reached constructor 59 without further mapping
-requests. Next: implement Bionic `clock` semantics and continue the
-sequence before reducing reservations or sharing unused capacity. Do not infer that unused space at this one
+The persistent sequence now completes all 208 constructors without further mapping
+requests. Next: measure JNI/lifecycle startup before reducing reservations or
+sharing unused capacity. Do not infer that unused space at this one
 checkpoint stays unused during gameplay. The supplied GTA PBP's MEMSIZE=1 and
 pool/streaming strings are reference clues only; no matching source was verified,
 so no allocator technique is attributed to that executable.
@@ -220,12 +219,11 @@ each routine checks a counter written by its predecessor before updating it.
 Other fixtures test sentinel entries, invalid metadata/targets, failure stopping
 and the exact instruction-limit boundary. Python 3 is required for this host test.
 
-Exact donor result with an 18 MiB mapping pool after ARM halfword transfer support:
-208 total entries, 60 attempted, 59 returned, zero skipped, 148 pending;
-3,036 successful steps. Constructor index 59 starts at 0x002309b4 and stops at
-0xf000037c (unsupported `clock` import). Live/peak mapped bytes remain
-16,781,312, bridge use 1,616, program-break use zero, total mapped image+arena
-30,285,824. No allocation failures occurred. These remain partial measurements.
+Exact donor result with an 18 MiB mapping pool after startup instruction/import support:
+208 total entries, 208 attempted, 208 returned, zero skipped, zero pending;
+8,264 successful steps. Live/peak mapped bytes remain 16,781,312, bridge use 1,616,
+program-break use zero, total mapped image+arena 30,285,824. No allocation failures
+occurred. This proves bounded host constructor completion, not full game startup.
 
 ## VFPv2 register and memory transfers
 
@@ -234,8 +232,8 @@ VLDR/VSTR and VLDM/VSTM support single/double transfers, PC-relative literals,
 increment-after and decrement-before addressing, including VPUSH/VPOP. Complete
 ranges, register counts, alignment and writeback addresses are checked before
 mutating memory/registers. Condition-failed instructions remain no-ops. Invalid
-lists, D16–D31 and unsupported arithmetic still stop explicitly. This is not full
-VFP emulation; no floating-point arithmetic or FPSCR semantics are implemented.
+lists, D16–D31 and unsupported arithmetic still stop explicitly. Required scalar
+arithmetic and FPSCR semantics are described below; VFP coverage remains partial.
 
 The host regression group tests bit-exact transfers (including NaN payloads and
 signed zero), aliasing, stack restoration, writeback, conditions and fault atomicity.
@@ -250,9 +248,54 @@ VPUSH and current STRH boundary. No host float approximation was introduced.
 
 STRH/LDRH/LDRSB/LDRSH support immediate and register offsets, adding/subtracting,
 pre/post indexing, writeback and PC-relative loads. Signed loads extend to 32 bits;
-stores preserve adjacent bytes. Unaligned halfwords, invalid operands, doubleword
-transfers and unprivileged variants stop explicitly. Address arithmetic wraps at
+stores preserve adjacent bytes. LDRD/STRD support even register pairs through
+R12/R13 and 8-byte-aligned accesses. Unaligned halfwords/doublewords, invalid
+operands and unprivileged variants stop explicitly. Address arithmetic wraps at
 32 bits, then the actual access is checked against the mapped image. Faults do not
 change memory, destination/base registers, PC or step count (the existing fetch
-path still refreshes the pipelined R15 value). Synthetic sanitizer tests and 240
+path still refreshes the pipelined R15 value). Synthetic sanitizer tests and 360
 Unicorn comparisons cover supported addressing modes. No new gameplay claim.
+
+
+## Constructor CPU support
+
+- Fixed the arithmetic decoder so immediate constant bits cannot be mistaken for
+  register-mode encodings. Added CLZ and signed/unsigned long multiply/accumulate.
+- VMOV core/single and core-pair/double transfers preserve raw bits. VCMP/VCMPE
+  binary32 comparisons handle NaNs, signed zero and FPSCR NZCV/invalid flags;
+  VMRS transfers FPSCR or its NZCV bits to the ARM condition flags.
+- A pinned Berkeley SoftFloat 3e subset with ARM-VFPv2 specialization implements
+  binary32 add/subtract/multiply/divide and non-fused multiply-accumulate/subtract,
+  binary32/binary64 conversion and signed/unsigned 32-bit integer-to-float conversion.
+  Rounding modes and cumulative exception flags are preserved. Default NaN mode
+  is supported; FZ, vector modes, enabled exception traps, double arithmetic and
+  other unimplemented opcodes stop explicitly. SoftFloat global state assumes the
+  existing single guest thread. Its BSD license accompanies CI binary artifacts.
+- 32,720 deterministic reference cases match Unicorn 2.1.4 registers, FPSCR,
+  condition flags and memory. Separate transfer checks cover 266 VFP and 360
+  integer memory vectors. This does not establish complete ARM ISA coverage.
+
+## Startup imports
+
+- `clock`: Bionic signed 32-bit microseconds, with unavailable/unrepresentable
+  values returned as -1. Host probes use C process time. PSP newlib's clock is
+  system uptime (verified from its linked `_times` implementation), so PSP uses
+  the single guest execution thread's kernel run time instead. The adapter has
+  mocked kernel unit tests and a PSP compile check; device timing remains untested.
+- `time`: signed 32-bit seconds and optional bounded guest output pointer. Times
+  outside ARM's range stop instead of silently truncating. Host failures return -1;
+  mapping host errno remains unimplemented.
+- ARM C++ guards: four bytes, initialized bit 0, private pending bit 1; acquire,
+  release and abort work for one guest thread. Recursive initialization stops.
+- `__atomic_swap`: Bionic `(new_value, address)` ABI, returns old word; aligned
+  and bounded, atomic with respect to the single guest thread only.
+- `sem_init`: four-byte Bionic layout (`count=value<<1`), maximum 0x3fffffff.
+  Invalid values return -1/EINVAL without changing the semaphore. Shared
+  semaphores, waiting, posting and thread creation still stop as unsupported.
+- `fopen`: only read-only `/proc/cpuinfo` is recognized and returns NULL/ENOENT,
+  reflecting PSP's lack of Linux procfs. The donor takes its own absent-file
+  fallback. General file/asset access remains unsupported; the host's CPU details
+  are never exposed as the guest's architecture.
+
+ABI sources: AOSP Bionic `android-2.3.7_r1` headers, `libc/bionic/semaphore.c`
+and `libc/arch-arm/bionic/atomics_arm.S`; ARM C++ ABI guard-object layout.

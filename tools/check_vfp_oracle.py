@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class CPU(c.Structure):
     _fields_ = [('r', c.c_uint32 * 16), ('cpsr', c.c_uint32), ('pc', c.c_uint32),
-                ('steps', c.c_uint32), ('thumb', c.c_uint32), ('vfp', c.c_uint32 * 32)]
+                ('steps', c.c_uint32), ('thumb', c.c_uint32), ('vfp', c.c_uint32 * 32), ('fpscr', c.c_uint32)]
 
 
 class Image(c.Structure):
@@ -46,8 +46,10 @@ with tempfile.TemporaryDirectory(prefix='ds-vfp-') as tmp:
                     'int ds_import_is_trampoline(uint32_t a){(void)a;return 0;}\n'
                     'int ds_import_call(uint32_t a,struct DsArmv6Cpu*c){(void)a;(void)c;return -1;}\n')
     libpath = pathlib.Path(tmp) / 'cpu.so'
-    subprocess.run(['cc', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror',
-                    str(ROOT / 'src/cpu/armv6.c'), str(stub), '-o', str(libpath)], check=True)
+    subprocess.run(['cc', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-label',
+                    str(ROOT / 'src/cpu/armv6.c'), str(stub),
+                    '-I'+str(ROOT/'third_party/softfloat/include'), '-I'+str(ROOT/'third_party/softfloat'),
+                    *map(str, sorted((ROOT/'third_party/softfloat').glob('*.c'))), '-o', str(libpath)], check=True)
     lib = c.CDLL(str(libpath))
     lib.ds_armv6_step.argtypes = [c.POINTER(CPU), c.POINTER(Image)]
     lib.ds_armv6_step.restype = c.c_int

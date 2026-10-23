@@ -28,5 +28,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: deadspace-psp-eboot
-          path: build/EBOOT.PBP
+          path: |
+            build/EBOOT.PBP
+            build/THIRD-PARTY-LICENSES.txt
           if-no-files-found: error

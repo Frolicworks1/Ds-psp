@@ -5,6 +5,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <time.h>
+#ifdef __psp__
+#include <pspthreadman.h>
+#endif
 
 #define DS_IMPORT_MAX 512
 
@@ -407,6 +411,82 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
             g_destructors[g_destructor_count++] = (DsGuestDestructor){function, argument, cpu->r[2]};
             cpu->r[0] = 0;
         }
+    } else if (!strcmp(name, "sem_init")) {
+        uint8_t *sem=guest_range(cpu->r[0],4);
+        if (!sem || (cpu->r[0]&3)) return -31;
+        if (cpu->r[1]) return -32; /* process-shared synchronization unsupported */
+        if (cpu->r[2]>0x3fffffffu) {
+            if (!g_errno) { g_errno=guest_alloc(4); if (!g_errno) return -31; }
+            store32(guest_range(g_errno,4),22); cpu->r[0]=UINT32_MAX;
+        } else { store32(sem,cpu->r[2]<<1); cpu->r[0]=0; }
+    } else if (!strcmp(name, "fopen")) {
+        const char *path=guest_string(cpu->r[0]), *mode=guest_string(cpu->r[1]);
+        if (!path || !mode) return -31;
+        /* PSP has no Linux procfs. Expose its absence for this optional CPU
+         * discovery file; general asset/file I/O is still unsupported. */
+        if (strcmp(path,"/proc/cpuinfo") || (strcmp(mode,"r") && strcmp(mode,"rb"))) return -32;
+        if (!g_errno) { g_errno=guest_alloc(4); if (!g_errno) return -31; }
+        store32(guest_range(g_errno,4),2); /* ENOENT */
+        cpu->r[0]=0;
+    } else if (!strcmp(name, "__atomic_swap")) {
+        /* Bionic ARM ABI: (new_value, address), returns the previous word.
+         * Guest execution is single threaded; no host pointer is exposed. */
+        uint8_t *word=guest_range(cpu->r[1],4);
+        if (!word || (cpu->r[1]&3)) return -31;
+        uint32_t old=load32(word);
+        store32(word,cpu->r[0]); cpu->r[0]=old;
+    } else if (!strcmp(name, "__cxa_guard_acquire") ||
+               !strcmp(name, "__cxa_guard_release") || !strcmp(name, "__cxa_guard_abort")) {
+        /* ARM C++ ABI uses a 32-bit guard, bit 0 means initialized.
+         * Bit 1 is our private pending marker for the single guest thread. */
+        uint8_t *guard=guest_range(cpu->r[0],4);
+        if (!guard || (cpu->r[0]&3)) return -31;
+        uint32_t value=load32(guard);
+        if (!strcmp(name,"__cxa_guard_acquire")) {
+            if (value&1) cpu->r[0]=0;
+            else if (value&2) return -32; /* recursive initialization */
+            else { store32(guard,value|2); cpu->r[0]=1; }
+        } else {
+            if (!(value&2) || (value&1)) return -32;
+            store32(guard,(value&~2u)|(!strcmp(name,"__cxa_guard_release")?1u:0u));
+            cpu->r[0]=0;
+        }
+    } else if (!strcmp(name, "time")) {
+        uint8_t *out=cpu->r[0] ? guest_range(cpu->r[0],4) : NULL;
+        if (cpu->r[0] && !out) return -31;
+        time_t now=time(NULL);
+        /* ARM Bionic time_t is signed 32-bit. No silent Y2038 truncation. */
+        if (now!=(time_t)-1 && (now>(time_t)INT32_MAX || now<(time_t)INT32_MIN))
+            return -32;
+        cpu->r[0]=(uint32_t)now;
+        if (out) store32(out,cpu->r[0]);
+    } else if (!strcmp(name, "clock")) {
+        /* Bionic ARM clock_t is signed 32-bit microseconds. PSP newlib's
+         * clock() is uptime, so measure the single guest execution thread's
+         * consumed CPU time through the kernel instead. */
+#ifdef __psp__
+        SceKernelThreadRunStatus status={0}; status.size=sizeof(status);
+        if (sceKernelReferThreadRunStatus(sceKernelGetThreadId(),&status)<0) cpu->r[0]=UINT32_MAX;
+        else {
+            unsigned seconds=0, microseconds=0;
+            if (sceKernelSysClock2USec(&status.runClocks,&seconds,&microseconds)<0)
+                cpu->r[0]=UINT32_MAX;
+            else {
+                uint64_t us=(uint64_t)seconds*1000000u+microseconds;
+                cpu->r[0]=us>INT32_MAX ? UINT32_MAX : (uint32_t)us;
+            }
+        }
+#else
+        clock_t ticks = clock();
+        if (ticks == (clock_t)-1) cpu->r[0] = UINT32_MAX;
+        else {
+            uint64_t whole = (uint64_t)ticks / CLOCKS_PER_SEC;
+            uint64_t fraction = (uint64_t)ticks % CLOCKS_PER_SEC;
+            uint64_t us = whole > 2147 ? UINT64_MAX :
+                whole * 1000000u + fraction * 1000000u / CLOCKS_PER_SEC;
+            cpu->r[0] = us > INT32_MAX ? UINT32_MAX : (uint32_t)us;
+        }
+#endif
     } else if (!strcmp(name, "__errno") || !strcmp(name, "sbrk") ||
         !strcmp(name, "mmap") || !strcmp(name, "munmap")) {
         if (!g_image) return -31;

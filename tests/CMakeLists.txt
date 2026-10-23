@@ -10,7 +10,7 @@ if(DSPSP_SANITIZE)
 endif()
 foreach(group selftest fetch_bounds flags_only arithmetic_flags carry_arithmetic
               register_shifts rrx arm_branches blx_immediate thumb_immediates
-              thumb_branches memory_bounds unsupported vfp_transfers halfword_transfers)
+              thumb_branches memory_bounds unsupported vfp_transfers halfword_transfers immediate_decode startup_cpu)
     add_test(NAME armv6_${group} COMMAND test_armv6 ${group})
 endforeach()
 
@@ -86,3 +86,34 @@ add_test(NAME atexit_imports COMMAND test_atexit)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME initializer_sequence COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_initializers.py $<TARGET_FILE:probe_guest>)
+
+add_executable(test_clock test_clock.c ../src/runtime/imports.c host/log.c)
+target_compile_options(test_clock PRIVATE -Wall -Wextra -Werror -Wpedantic)
+if(DSPSP_SANITIZE)
+    target_compile_options(test_clock PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(test_clock PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME clock_import COMMAND test_clock)
+
+add_subdirectory(../third_party/softfloat softfloat)
+foreach(cpu_target test_armv6 probe_guest test_stdio)
+    target_link_libraries(${cpu_target} PRIVATE ds_softfloat)
+endforeach()
+
+add_executable(test_startup_imports test_startup_imports.c ../src/runtime/imports.c host/log.c)
+target_compile_options(test_startup_imports PRIVATE -Wall -Wextra -Werror -Wpedantic)
+if(DSPSP_SANITIZE)
+    target_compile_options(test_startup_imports PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(test_startup_imports PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME startup_imports COMMAND test_startup_imports)
+
+add_executable(test_clock_psp test_clock_psp.c ../src/runtime/imports.c host/log.c)
+target_include_directories(test_clock_psp PRIVATE psp_clock)
+target_compile_definitions(test_clock_psp PRIVATE __psp__)
+target_compile_options(test_clock_psp PRIVATE -Wall -Wextra -Werror -Wpedantic)
+if(DSPSP_SANITIZE)
+    target_compile_options(test_clock_psp PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(test_clock_psp PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME clock_psp_adapter COMMAND test_clock_psp)

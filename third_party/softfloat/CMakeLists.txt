@@ -1,0 +1,7 @@
+file(GLOB SOFTFLOAT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.c")
+add_library(ds_softfloat STATIC ${SOFTFLOAT_SOURCES})
+target_include_directories(ds_softfloat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(ds_softfloat PRIVATE -O2)
+if(DSPSP_SANITIZE)
+    target_compile_options(ds_softfloat PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+endif()

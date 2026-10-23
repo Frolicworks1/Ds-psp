@@ -219,8 +219,53 @@ static int halfword_transfers(void) {
     return 0;
 }
 
+static int immediate_decode(void) {
+    Fixture f; reset(&f,0xe3a024bfu,0); /* MOV r2,#0xbf000000: immediate bits aren't an opcode */
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[2]==0xbf000000);
+    reset(&f,0xe3821090u,0); f.cpu.r[2]=1; /* ORR r1,r2,#0x90 */
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[1]==0x91);
+    return 0;
+}
+
+static int startup_cpu(void) {
+    Fixture f; reset(&f,0xe0c32190,0); /* SMULL r2,r3,r0,r1 */
+    f.cpu.r[0]=0x80000000; f.cpu.r[1]=0xffffffff;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.r[2]==0x80000000 && f.cpu.r[3]==0);
+    reset(&f,0xe0b32190,0); /* UMLALS with carry into high half and wrap */
+    f.cpu.r[0]=1;f.cpu.r[1]=1;f.cpu.r[2]=f.cpu.r[3]=UINT32_MAX;f.cpu.cpsr=C|V;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && !f.cpu.r[2] && !f.cpu.r[3] && f.cpu.cpsr==(Z|C|V));
+    reset(&f,0xe16f2f1c,0);CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.r[2]==32);
+    reset(&f,0xe16f2f1c,0);f.cpu.r[12]=1;CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.r[2]==31);
+    reset(&f,0xe1e300f8,0);f.cpu.r[3]=0x1080;f.cpu.r[0]=0x12345678;f.cpu.r[1]=0xabcdef01;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.r[3]==0x1088 && f.words[34]==0x12345678 && f.words[35]==0xabcdef01);
+    reset(&f,0xe1c300d0,0);f.cpu.r[3]=0x10f8;f.words[62]=42;f.words[63]=43;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.r[0]==42 && f.cpu.r[1]==43);
+    reset(&f,0xe1e300f8,0);f.cpu.r[3]=0x10f8;f.cpu.r[0]=42;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-3 && f.cpu.r[3]==0x10f8 && f.cpu.pc==0x1000);
+    reset(&f,0xee071a90,0);f.cpu.r[1]=0x80000000;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.vfp[15]==0x80000000);
+    reset(&f,0xeef57a40,0);f.cpu.vfp[15]=0x80000000;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.fpscr==(Z|C));
+    reset(&f,0xeef1fa10,0);f.cpu.fpscr=N|1;f.cpu.cpsr=C|0x10;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.cpsr==(N|0x10));
+    reset(&f,0xee200a01,0);f.cpu.vfp[0]=0x40000000;f.cpu.vfp[2]=0x40400000;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.vfp[0]==0x40c00000 && !f.cpu.fpscr);
+    reset(&f,0xee800a01,0);f.cpu.vfp[0]=0x3f800000;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.vfp[0]==0x7f800000 && f.cpu.fpscr==2);
+    reset(&f,0xee800a01,0);f.cpu.vfp[0]=0x3f800000;f.cpu.fpscr=0x200;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-2 && f.cpu.vfp[0]==0x3f800000 && f.cpu.fpscr==0x200 && f.cpu.pc==0x1000);
+    reset(&f,0xee300a01,0);f.cpu.fpscr=0x01000000;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==-2); /* FZ mode remains gated */
+    reset(&f,0xeeb70ac1,0);f.cpu.vfp[2]=0x3fc00000;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.vfp[0]==0 && f.cpu.vfp[1]==0x3ff80000);
+    reset(&f,0xeeb80bc1,0);f.cpu.vfp[2]=0xffffffff;
+    CHECK(!ds_armv6_step(&f.cpu,&f.image) && f.cpu.vfp[1]==0xbff00000 && !f.cpu.vfp[0]);
+    reset(&f,0xeef70ac1,0);CHECK(ds_armv6_step(&f.cpu,&f.image)==-2); /* D16 */
+    return 0;
+}
+
 static int unsupported(void) {
-    Fixture f; reset(&f,0xe1c100d0u,0); /* LDRD remains unsupported */
+    Fixture f; reset(&f,0xe1c110d0u,0); /* LDRD with odd destination is unpredictable */
     f.cpu.r[0]=0x1234u;
     CHECK(ds_armv6_step(&f.cpu,&f.image)==-2 && f.cpu.r[0]==0x1234u);
     reset(&f,0xe10f0000u,0); /* MRS must not be interpreted as TST */
@@ -261,7 +306,7 @@ static int vfp_transfers(void) {
     CHECK(ds_armv6_step(&f.cpu,&f.image)==-3);
     reset(&f,0xedd10a01u,0);f.cpu.r[1]=0x1081;
     CHECK(ds_armv6_step(&f.cpu,&f.image)==-3);
-    const uint32_t bad[]={0xed6d0b02u,0xed2d8b03u,0xecb1fa04u,0xecb10a00u,0xee300a00u};
+    const uint32_t bad[]={0xed6d0b02u,0xed2d8b03u,0xecb1fa04u,0xecb10a00u,0xeeb10ac0u};
     for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
         reset(&f,bad[i],0);f.cpu.r[1]=0x1080;f.cpu.r[13]=0x1100;
         CHECK(ds_armv6_step(&f.cpu,&f.image)==-2 && f.cpu.pc==0x1000 && f.cpu.steps==0);
@@ -273,7 +318,7 @@ static int vfp_transfers(void) {
 
 int main(int argc, char **argv) {
     const struct { const char *name; int (*run)(void); } tests[] = {
-        {"halfword_transfers",halfword_transfers},{"vfp_transfers",vfp_transfers},{"selftest",selftest},{"fetch_bounds",fetch_bounds},{"flags_only",flags_only},
+        {"startup_cpu",startup_cpu},{"immediate_decode",immediate_decode},{"halfword_transfers",halfword_transfers},{"vfp_transfers",vfp_transfers},{"selftest",selftest},{"fetch_bounds",fetch_bounds},{"flags_only",flags_only},
         {"arithmetic_flags",arithmetic_flags},{"carry_arithmetic",carry_arithmetic},
         {"register_shifts",register_shifts},{"rrx",rrx},{"arm_branches",arm_branches},
         {"blx_immediate",blx_immediate},{"thumb_immediates",thumb_immediates},

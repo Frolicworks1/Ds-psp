@@ -25,6 +25,11 @@ add_executable(EBOOT.ELF
     src/cpu/armv6.c
 )
 
+configure_file(third_party/softfloat/COPYING.txt "${CMAKE_CURRENT_BINARY_DIR}/THIRD-PARTY-LICENSES.txt" COPYONLY)
+add_subdirectory(third_party/softfloat)
+target_compile_options(ds_softfloat PRIVATE -G0)
+target_link_libraries(EBOOT.ELF ds_softfloat)
+
 target_compile_options(EBOOT.ELF PRIVATE -O2 -G0 -Wall -Wextra)
 target_link_options(EBOOT.ELF PRIVATE -G0)
 target_link_libraries(EBOOT.ELF pspdebug pspge pspdisplay pspctrl pspkernel)

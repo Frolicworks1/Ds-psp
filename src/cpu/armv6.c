@@ -1,5 +1,6 @@
 #include "armv6.h"
 #include <string.h>
+#include "softfloat.h"
 #include "../runtime/imports.h"
 
 #define N_FLAG 0x80000000u
@@ -98,27 +99,36 @@ static int vfp_memory(DsArmv6Cpu *cpu, const DsArmv6Image *image, uint32_t insn)
     return 0;
 }
 
-/* ARMv5 addressing mode 3: STRH, LDRH, LDRSB and LDRSH.
+/* ARMv5 addressing mode 3: halfword, signed and doubleword transfers.
  * Reject unpredictable operands and unaligned halfwords rather than inventing
- * ARMv5 implementation-dependent results. Doubleword transfers stay unsupported. */
+ * ARMv5 implementation-dependent results. */
 static int extra_memory(DsArmv6Cpu *cpu, const DsArmv6Image *image, uint32_t insn) {
     unsigned pre=(insn>>24)&1, up=(insn>>23)&1, imm=(insn>>22)&1;
     unsigned wb=(insn>>21)&1, load=(insn>>20)&1;
     unsigned rn=(insn>>16)&15, rd=(insn>>12)&15, kind=(insn>>5)&3;
     unsigned rm=insn&15, writeback=!pre || wb;
-    if (!kind || (!load && kind!=1) || rd==15 ||
+    unsigned dbl=!load && kind>=2;
+    if (dbl && ((rd&1) || rd>=14 || (writeback && rn==rd+1))) return -2;
+    if (!kind || rd==15 ||
         (!pre && wb) || (writeback && (rn==15 || rn==rd)) ||
         (!imm && ((insn&0xf00) || rm==15 || (writeback && rn==rm)))) return -2;
     uint32_t offset=imm ? ((insn>>4)&0xf0)|(insn&15) : cpu->r[rm];
     uint32_t base=cpu->r[rn];
     uint32_t updated=up ? base+offset : base-offset;
     uint32_t addr=pre ? updated : base;
-    unsigned bytes=kind==2 ? 1 : 2;
+    unsigned bytes=dbl ? 8 : kind==2 ? 1 : 2;
+    if (dbl && (addr&7)) return -3;
     if ((bytes==2 && (addr&1)) || addr<image->load_addr) return -3;
     uint32_t off=addr-image->load_addr;
     if (off>image->size || image->size-off<bytes) return -3;
     uint8_t *memory=image->base+off;
-    if (load) {
+    if (dbl) {
+        if (kind==2) {
+            memcpy(&cpu->r[rd],memory,4); memcpy(&cpu->r[rd+1],memory+4,4);
+        } else {
+            memcpy(memory,&cpu->r[rd],4); memcpy(memory+4,&cpu->r[rd+1],4);
+        }
+    } else if (load) {
         uint32_t value=memory[0];
         if (bytes==2) value|=(uint32_t)memory[1]<<8;
         if (kind==2 && (value&0x80)) value|=0xffffff00u;
@@ -132,6 +142,106 @@ static int extra_memory(DsArmv6Cpu *cpu, const DsArmv6Image *image, uint32_t ins
     cpu->pc+=4;
     ++cpu->steps;
     return 0;
+}
+
+/* Compare raw IEEE binary32 values without relying on host floating-point
+ * rounding, NaN handling or signed-zero rules. FZ/vector modes remain gated. */
+static int vfp_compare(DsArmv6Cpu *cpu, uint32_t insn) {
+    unsigned zero=(insn>>16)&1, signal=(insn>>7)&1;
+    unsigned sd=((insn>>12)&15)*2+((insn>>22)&1);
+    unsigned sm=(insn&15)*2+((insn>>5)&1);
+    if ((zero && (insn&0x2f)) || (cpu->fpscr&0x01370000u)) return -2;
+    uint32_t a=cpu->vfp[sd], b=zero ? 0 : cpu->vfp[sm];
+    uint32_t ma=a&0x7fffffffu, mb=b&0x7fffffffu, flags;
+    int nan_a=ma>0x7f800000u, nan_b=mb>0x7f800000u;
+    int invalid=(nan_a && (signal || !(a&0x400000))) ||
+                (nan_b && (signal || !(b&0x400000)));
+    if (invalid && (cpu->fpscr&0x100)) return -2; /* enabled exception */
+    if (nan_a || nan_b) flags=C_FLAG|V_FLAG;
+    else if (a==b || (!ma && !mb)) flags=Z_FLAG|C_FLAG;
+    else {
+        int less=((a^b)&N_FLAG) ? !!(a&N_FLAG) :
+            ((a&N_FLAG) ? ma>mb : ma<mb);
+        flags=less ? N_FLAG : C_FLAG;
+    }
+    cpu->fpscr=(cpu->fpscr&0x0fffffffu)|flags|(unsigned)invalid;
+    cpu->pc+=4; ++cpu->steps; return 0;
+}
+
+static void vfp_begin(DsArmv6Cpu *cpu) {
+    static const uint_fast8_t modes[]={softfloat_round_near_even,
+        softfloat_round_max,softfloat_round_min,softfloat_round_minMag};
+    softfloat_roundingMode=modes[(cpu->fpscr>>22)&3];
+    softfloat_detectTininess=softfloat_tininess_beforeRounding;
+    softfloat_exceptionFlags=0;
+}
+static uint32_t vfp_flags(void) {
+    unsigned f=softfloat_exceptionFlags;
+    return ((f&softfloat_flag_invalid)?1:0)|
+        ((f&softfloat_flag_infinite)?2:0)|((f&softfloat_flag_overflow)?4:0)|
+        ((f&softfloat_flag_underflow)?8:0)|((f&softfloat_flag_inexact)?16:0);
+}
+static int vfp_convert_precision(DsArmv6Cpu *cpu,uint32_t insn) {
+    unsigned narrow=(insn>>8)&1, d=(insn>>22)&1, m=(insn>>5)&1;
+    unsigned vd=(insn>>12)&15, vm=insn&15;
+    if ((cpu->fpscr&0x01370000u) || (narrow?m:d)) return -2;
+    vfp_begin(cpu);
+    uint64_t result;
+    if (narrow) {
+        float64_t a={(uint64_t)cpu->vfp[vm*2]|((uint64_t)cpu->vfp[vm*2+1]<<32)};
+        result=f64_to_f32(a).v;
+        if ((cpu->fpscr&0x02000000u) && (result&0x7fffffffu)>0x7f800000u) result=0x7fc00000;
+    } else {
+        float32_t a={cpu->vfp[vm*2+m]}; result=f32_to_f64(a).v;
+        if ((cpu->fpscr&0x02000000u) && (result&UINT64_C(0x7fffffffffffffff))>UINT64_C(0x7ff0000000000000))
+            result=UINT64_C(0x7ff8000000000000);
+    }
+    uint32_t flags=vfp_flags();
+    if (flags&(cpu->fpscr>>8)) return -2;
+    cpu->vfp[vd*2+(narrow?d:0)]=(uint32_t)result;
+    if (!narrow) cpu->vfp[vd*2+1]=(uint32_t)(result>>32);
+    cpu->fpscr|=flags; cpu->pc+=4; ++cpu->steps; return 0;
+}
+
+static int vfp_from_integer(DsArmv6Cpu *cpu,uint32_t insn) {
+    unsigned dbl=(insn>>8)&1, d=(insn>>22)&1, vd=(insn>>12)&15;
+    unsigned sm=(insn&15)*2+((insn>>5)&1), sign=(insn>>7)&1;
+    if ((dbl && d) || (cpu->fpscr&0x01370000u)) return -2;
+    vfp_begin(cpu);
+    uint32_t bits=cpu->vfp[sm]; int32_t signed_value;
+    memcpy(&signed_value,&bits,4);
+    uint64_t result=dbl ? (sign?i32_to_f64(signed_value).v:ui32_to_f64(bits).v) :
+        (sign?i32_to_f32(signed_value).v:ui32_to_f32(bits).v);
+    uint32_t flags=vfp_flags(); if (flags&(cpu->fpscr>>8)) return -2;
+    cpu->vfp[vd*2+(dbl?0:d)]=(uint32_t)result;
+    if (dbl) cpu->vfp[vd*2+1]=(uint32_t)(result>>32);
+    cpu->fpscr|=flags; cpu->pc+=4; ++cpu->steps; return 0;
+}
+
+static int vfp_arithmetic(DsArmv6Cpu *cpu, uint32_t insn) {
+    unsigned op=(insn>>20)&11, sub=(insn>>6)&1;
+    unsigned sd=((insn>>12)&15)*2+((insn>>22)&1);
+    unsigned sn=((insn>>16)&15)*2+((insn>>7)&1);
+    unsigned sm=(insn&15)*2+((insn>>5)&1);
+    /* Scalar IEEE mode only; FZ and vector modes stop until implemented. */
+    if (cpu->fpscr&0x01370000u) return -2;
+    if (!(op==0 || (op==2 && !sub) || op==3 || (op==8 && !sub))) return -2;
+    vfp_begin(cpu);
+    float32_t a={cpu->vfp[sn]}, b={cpu->vfp[sm]}, z;
+    if (op==0) {
+        /* VMLA/VMLS round the multiply before the accumulate (not fused). */
+        float32_t product=f32_mul(a,b), accum={cpu->vfp[sd]};
+        if (sub) product.v^=0x80000000u;
+        z=f32_add(accum,product);
+    } else if (op==2) z=f32_mul(a,b);
+    else if (op==8) z=f32_div(a,b);
+    else z=sub ? f32_sub(a,b) : f32_add(a,b);
+    uint32_t flags=vfp_flags();
+    if (flags & (cpu->fpscr>>8)) return -2; /* exception trapping unsupported */
+    if ((cpu->fpscr&0x02000000u) && (z.v&0x7fffffffu)>0x7f800000u)
+        z.v=0x7fc00000u; /* default NaN */
+    cpu->vfp[sd]=z.v; cpu->fpscr|=flags;
+    cpu->pc+=4; ++cpu->steps; return 0;
 }
 
 static uint32_t operand2(DsArmv6Cpu *cpu, uint32_t insn, unsigned *carry) {
@@ -263,6 +373,41 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         return 0;
     }
 
+    if ((insn&0x0fbf0e50u)==0x0eb80a40u)
+        return vfp_from_integer(cpu,insn);
+    if ((insn&0x0fbf0ed0u)==0x0eb70ac0u)
+        return vfp_convert_precision(cpu,insn);
+    if ((insn&0x0f000e10u)==0x0e000a00u && !(insn&0x100u) &&
+        (((insn>>20)&11)==0 || ((insn>>20)&11)==2 || ((insn>>20)&11)==3 || ((insn>>20)&11)==8))
+        return vfp_arithmetic(cpu,insn);
+    if ((insn&0x0fbf0f50u)==0x0eb40a40u ||
+        (insn&0x0fbf0f50u)==0x0eb50a40u)
+        return vfp_compare(cpu,insn);
+    if ((insn&0x0fff0fffu)==0x0ef10a10u) { /* VMRS */
+        unsigned rt=(insn>>12)&15;
+        if (rt==15) cpu->cpsr=(cpu->cpsr&0x0fffffffu)|(cpu->fpscr&0xf0000000u);
+        else cpu->r[rt]=cpu->fpscr;
+        cpu->pc=next_pc; ++cpu->steps; return 0;
+    }
+
+    /* VMOV between one ARM register and one raw VFP single register. */
+    if ((insn & 0x0fe00f7fu) == 0x0e000a10u) {
+        unsigned rt=(insn>>12)&15, sn=((insn>>16)&15)*2+((insn>>7)&1);
+        if (rt==15) return -2;
+        if (insn&0x00100000u) cpu->r[rt]=cpu->vfp[sn];
+        else cpu->vfp[sn]=cpu->r[rt];
+        cpu->pc=next_pc; ++cpu->steps; return 0;
+    }
+
+    if ((insn&0x0fe00fd0u)==0x0c400b10u) { /* VMOV two ARM regs <-> Dn */
+        unsigned rt=(insn>>12)&15, rt2=(insn>>16)&15, dm=insn&15;
+        unsigned load=(insn>>20)&1;
+        if ((insn&0x20) || rt==15 || rt2==15 || (load && rt==rt2)) return -2;
+        if (load) { cpu->r[rt]=cpu->vfp[dm*2]; cpu->r[rt2]=cpu->vfp[dm*2+1]; }
+        else { cpu->vfp[dm*2]=cpu->r[rt]; cpu->vfp[dm*2+1]=cpu->r[rt2]; }
+        cpu->pc=next_pc; ++cpu->steps; return 0;
+    }
+
     if ((insn & 0x0e000e00u) == 0x0c000a00u)
         return vfp_memory(cpu, image, insn);
 
@@ -392,6 +537,32 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         return 0;
     }
 
+    if ((insn&0x0fff0ff0u)==0x016f0f10u) { /* CLZ */
+        unsigned dest=(insn>>12)&15, source=insn&15;
+        if (dest==15 || source==15) return -2;
+        uint32_t value=cpu->r[source]; unsigned count=0;
+        while (count<32 && !(value&0x80000000u)) { ++count; value<<=1; }
+        cpu->r[dest]=count; cpu->pc=next_pc; ++cpu->steps; return 0;
+    }
+
+    /* UMULL/UMLAL/SMULL/SMLAL: snapshot operands before writing either half. */
+    if ((insn&0x0f8000f0u)==0x00800090u) {
+        unsigned hi=(insn>>16)&15, lo=(insn>>12)&15;
+        unsigned rs=(insn>>8)&15, rm=insn&15;
+        if (hi==15 || lo==15 || rs==15 || rm==15 || hi==lo) return -2;
+        uint64_t product;
+        if (insn&0x00400000u) {
+            int64_t a=(cpu->r[rm]&0x80000000u) ? (int64_t)cpu->r[rm]-0x100000000LL : cpu->r[rm];
+            int64_t b=(cpu->r[rs]&0x80000000u) ? (int64_t)cpu->r[rs]-0x100000000LL : cpu->r[rs];
+            product=(uint64_t)(a*b);
+        } else product=(uint64_t)cpu->r[rm]*cpu->r[rs];
+        if (insn&0x00200000u) product+=((uint64_t)cpu->r[hi]<<32)|cpu->r[lo];
+        cpu->r[lo]=(uint32_t)product; cpu->r[hi]=(uint32_t)(product>>32);
+        if (insn&0x00100000u)
+            cpu->cpsr=(cpu->cpsr&~(N_FLAG|Z_FLAG))|(cpu->r[hi]&N_FLAG)|(!product?Z_FLAG:0);
+        cpu->pc=next_pc; ++cpu->steps; return 0;
+    }
+
     /* MUL/MLA, with optional flag update. */
     if ((insn & 0x0fc000f0u) == 0x00000090u) {
         unsigned rd2 = (insn >> 16) & 0xfu;
@@ -419,7 +590,7 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
 
     if ((insn & 0x0c000000u) != 0) return -2;
     /* Do not reinterpret halfword transfers or PSR operations as arithmetic. */
-    if ((insn & 0x90u) == 0x90u) return -2;
+    if (!(insn & 0x02000000u) && (insn & 0x90u) == 0x90u) return -2;
     unsigned opcode = (insn >> 21) & 0xfu;
     int flags_only = opcode >= 8u && opcode <= 11u;
     if (flags_only && !(insn & 0x00100000u)) return -2;
