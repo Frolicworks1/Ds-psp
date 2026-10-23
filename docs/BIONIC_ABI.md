@@ -64,11 +64,34 @@ The port does not yet provide randomized canaries. `__stack_chk_fail` logs the
 fault and stops guest execution with error -33; the CPU reports import failure
 as -30. It never returns success to corrupted guest code.
 
+## Mutexes during single-thread initialization
+
+The bridge implements mutex attributes, initialization, destruction, lock,
+trylock and unlock using the 32-bit guest layout from historical
+[pthread.c](https://android.googlesource.com/platform/bionic/+/android-4.0.1_r1/libc/bionic/pthread.c).
+Types normal/recursive/error-check are 0/1/2 in attributes and bits 14–15 in
+mutexes. Bits 2–12 hold recursive depth beyond the first lock; bits 16–31 hold
+the owner for recursive/error-check mutexes. The single guest thread has ID 1.
+Static initializers work without a host-side registry. Android error values are
+returned for invalid arguments, busy trylocks and ownership errors.
+
+This is not a threading implementation. Thread creation, timed locking, shared
+mutexes, contended states and any lock needing a wait stop execution explicitly.
+Before adding a scheduler, replace the fixed owner ID and serialize state
+transitions; the current bridge must not run concurrently. As conservative
+limits, destroying a held recursive mutex returns EBUSY and recursive count
+exhaustion returns EAGAIN. The old Bionic source instead allowed trylock-based
+destruction by the owner and wrapped its recursive counter; those behaviors are
+not reproduced. Bad guest memory or alignment stops before state mutation.
+
 ## Execution checkpoint
 
-All seven required data globals now resolve for the recorded donor. The bounded
-first-constructor probe reaches `pthread_mutexattr_init` at trampoline
-`0xf000057c` after 191 successful steps, then stops. No complete constructor,
-JNI initialization or gameplay is established. ELF PLT stubs that load PC directly
-now dispatch registered imports before instruction fetch; synthetic tests cover
-this path independently of the donor.
+All seven required data globals resolve for the recorded donor. The bounded
+first-constructor probe now reaches `sbrk` at trampoline `0xf00001e8` after
+1,166 successful steps, then stops. No complete constructor, JNI initialization
+or gameplay is established. Next, design the guest program break with explicit
+heap/stack separation and allocation ownership; do not let `sbrk` overlap the
+import bridge's allocations or guest stack.
+
+ELF PLT stubs that load PC directly dispatch registered imports before instruction
+fetch; synthetic tests cover this path independently of the donor.

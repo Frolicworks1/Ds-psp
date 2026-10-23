@@ -83,6 +83,87 @@ static void store32(uint8_t *p, uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (8 * i));
 }
 
+static uint32_t load32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
+           (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* Single guest execution thread (id 1). No host pthread objects are used.
+ * Shared/contended operations stop until a guest scheduler exists. Return
+ * Android errno values to the guest; negative values are interpreter stops. */
+static int mutex_call(const char *name, struct DsArmv6Cpu *cpu) {
+    static const char *supported[] = {
+        "pthread_mutexattr_init", "pthread_mutexattr_destroy",
+        "pthread_mutexattr_gettype", "pthread_mutexattr_settype",
+        "pthread_mutexattr_getpshared", "pthread_mutexattr_setpshared",
+        "pthread_mutex_init", "pthread_mutex_destroy", "pthread_mutex_lock",
+        "pthread_mutex_trylock", "pthread_mutex_unlock"
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i)
+        if (!strcmp(name, supported[i])) break;
+    if (i == sizeof(supported) / sizeof(supported[0])) return -32;
+    uint32_t addr = cpu->r[0], arg = cpu->r[1];
+    if (!addr) { cpu->r[0] = 22; return 0; } /* EINVAL */
+    uint8_t *p = guest_range(addr, 4);
+    if (!p || (addr & 3)) return -31;
+    uint32_t value = load32(p), result = 0;
+    if (!strcmp(name, "pthread_mutexattr_init")) store32(p, 0);
+    else if (!strcmp(name, "pthread_mutexattr_destroy")) store32(p, UINT32_MAX);
+    else if (!strcmp(name, "pthread_mutexattr_settype")) {
+        if (arg > 2) result = 22;
+        else store32(p, (value & ~15u) | arg);
+    } else if (!strcmp(name, "pthread_mutexattr_gettype") ||
+               !strcmp(name, "pthread_mutexattr_getpshared")) {
+        uint8_t *out = guest_range(arg, 4);
+        if (!arg) result = 22;
+        else if (!out || (arg & 3)) return -31;
+        else if ((value & 15) > 2) result = 22;
+        else store32(out, !strcmp(name, "pthread_mutexattr_gettype") ? value & 15 : !!(value & 16));
+    } else if (!strcmp(name, "pthread_mutexattr_setpshared")) {
+        if (arg > 1) result = 22;
+        else store32(p, (value & ~16u) | (arg << 4));
+    } else if (!strcmp(name, "pthread_mutex_init")) {
+        uint32_t attr = 0;
+        if (arg) {
+            const uint8_t *a = guest_range(arg, 4);
+            if (!a || (arg & 3)) return -31;
+            attr = load32(a);
+        }
+        if ((attr & 15) > 2) result = 22;
+        else if (attr & 16) return -32;
+        else store32(p, (attr & 15) << 14);
+    } else if (!strcmp(name, "pthread_mutex_lock") ||
+               !strcmp(name, "pthread_mutex_trylock") ||
+               !strcmp(name, "pthread_mutex_unlock") ||
+               !strcmp(name, "pthread_mutex_destroy")) {
+        unsigned type = (value >> 14) & 3, state = value & 3;
+        unsigned owner = value >> 16;
+        if (value == 0xdead10ccu || type == 3 || state == 3) result = 22;
+        else if (value & 0x2000 || state == 2) return -32;
+        else if ((!type && (value & ~3u)) ||
+                 (!state && (value & 0xffff1ffcu)) ||
+                 (type && state && !owner)) result = 22;
+        else if (!strcmp(name, "pthread_mutex_destroy")) {
+            if (state) result = 16; /* EBUSY */
+            else store32(p, 0xdead10ccu);
+        } else if (!strcmp(name, "pthread_mutex_unlock")) {
+            if (type && (!state || owner != 1)) result = 1; /* EPERM */
+            else if (type == 1 && (value & 0x1ffc)) store32(p, value - 4);
+            else store32(p, type << 14);
+        } else if (!state) {
+            store32(p, (type << 14) | 1u | (type ? 0x10000u : 0));
+        } else if (type && owner == 1) {
+            if (type == 2) result = 35; /* Bionic EDEADLK */
+            else if ((value & 0x1ffc) == 0x1ffc) result = 11; /* EAGAIN, no wrap */
+            else store32(p, value + 4);
+        } else if (!strcmp(name, "pthread_mutex_trylock")) result = 16;
+        else return -32; /* Cannot wait without scheduling another guest thread. */
+    } else return -32;
+    cpu->r[0] = result;
+    return 0;
+}
+
 /* Three 84-byte ARM FILEs followed by three 12-byte extensions. No host
  * FILE or callback pointers are exposed. Wide I/O is disabled in this ABI. */
 static uint32_t stdio_data(void) {
@@ -220,7 +301,13 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
         dspsp_log("guest stack corruption detected pc=0x%08x", cpu->pc);
         return -33;
     }
-    if (!strcmp(name, "fwrite") || !strcmp(name, "fputs") || !strcmp(name, "__swrite")) {
+    if (!strncmp(name, "pthread_mutex", 13)) {
+        int rc = mutex_call(name, cpu);
+        if (rc) {
+            dspsp_log("guest mutex stop: %s error=%d pc=0x%08x", name, rc, cpu->pc);
+            return rc;
+        }
+    } else if (!strcmp(name, "fwrite") || !strcmp(name, "fputs") || !strcmp(name, "__swrite")) {
         uint32_t stream, addr, count, unit = 1;
         int is_fwrite = !strcmp(name, "fwrite");
         int is_fputs = !strcmp(name, "fputs");
