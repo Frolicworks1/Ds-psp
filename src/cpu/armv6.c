@@ -167,6 +167,12 @@ static int thumb_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
 }
 
 int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
+    /* ELF PLT stubs can load PC directly, without going through BX/BLX. */
+    if (cpu && ds_import_is_trampoline(cpu->pc)) {
+        if (ds_import_call(cpu->pc, cpu)) return -30;
+        ++cpu->steps;
+        return 0;
+    }
     if (cpu && cpu->thumb) return thumb_step(cpu,image);
     uint32_t insn, op1, op2, result;
     unsigned cond, rn, rd, carry, overflow = 0;

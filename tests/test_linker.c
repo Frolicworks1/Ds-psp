@@ -70,7 +70,7 @@ static void test_data_imports(void) {
         }
     }
     CHECK(ds_import_resolve_count()==0);
-    CHECK(ds_import_resolve_data("__sF")==0 && ds_import_resolve_data(NULL)==0);
+    CHECK(ds_import_resolve_data("unknown_data")==0 && ds_import_resolve_data(NULL)==0);
     /* Relocation must store the address of the pointer variable, not its value. */
     fixture(R_ARM_GLOB_DAT,STT_OBJECT);
     put(0x400,"\0_ctype_",9);

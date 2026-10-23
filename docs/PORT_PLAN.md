@@ -32,7 +32,7 @@ binaries/assets and personal saves out of commits.
 | Stage | Work | Acceptance gate | Current state |
 | --- | --- | --- | --- |
 | M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and 13 CPU groups pass locally; physical/emulator boot not yet verified |
-| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; three character-table imports supported; donor now stops at `__sF` |
+| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; first constructor reaches unsupported `pthread_mutexattr_init` |
 | M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter only; VFP and many instructions remain absent |
 | M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Unimplemented beyond a few memory/string imports |
 | M4: first genuine frame | Map exercised GLES 1.x functions to GU/GUM; handle state, geometry, textures, formats and render targets | Original game produces a recognizable menu/loading frame; captures and logs confirm real guest rendering; no fabricated image | Not reached |
@@ -119,11 +119,10 @@ import rejection, memory/string bounds and stable import ownership. This is not
 a complete hostile-ELF validator: overlapping segments/tables and complete dynamic
 symbol counts still need validation before M1 is complete.
 
-The exact donor now stops before constructor execution at `__sF`.
-Its seven required data symbols are `_toupper_tab_`, `_tolower_tab_`, `_ctype_`,
-`__sF`, `tzname`, `__page_size`, and `__stack_chk_guard`. The three character
-tables now have guest storage and exhaustive reference-table tests (see
-[Bionic ABI](BIONIC_ABI.md)). Next, implement the remaining four with verified
-Bionic layouts and services; do not point them at
-function trampolines or host libc objects. Constructor enumeration/execution,
-stack/heap separation, and JNI remain outstanding.
+The exact donor now completes relocation and begins its first constructor.
+After 191 successful steps it stops at `pthread_mutexattr_init`. All seven data
+symbols have guest storage; standard output/error have a bounded log adapter.
+See [Bionic ABI](BIONIC_ABI.md) for verified layouts and service limitations.
+Next: implement tested mutex attributes/mutex behavior, continue bounded
+constructor tracing, account for all 208 constructor entries, and separate stack
+and heap allocations. JNI startup and complete ELF validation remain outstanding.

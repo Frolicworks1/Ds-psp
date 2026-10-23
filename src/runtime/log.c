@@ -20,10 +20,16 @@ void dspsp_log(const char *fmt,...){
     va_start(ap,fmt);
     if(p<(int)sizeof(b)) p+=vsnprintf(b+p,sizeof(b)-p,fmt,ap);
     va_end(ap);
+    if(p >= (int)sizeof(b)) p = (int)sizeof(b) - 1;
     if(p>0) sceIoWrite(g_log,b,p);
     sceIoWrite(g_log,"\n",1);
 }
 
 void dspsp_log_close(void){
     if(g_log>=0){ sceIoClose(g_log); g_log=-1; }
+}
+
+int dspsp_log_write(const void *data, unsigned size) {
+    if (g_log < 0 || size > 0x7fffffffu) return -1;
+    return sceIoWrite(g_log, data, size);
 }
