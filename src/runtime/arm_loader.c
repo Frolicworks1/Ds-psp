@@ -61,6 +61,9 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
         sceIoClose(fd); return -5;
     }
 
+    /* Page-align the arena so the guest allocator receives an aligned break. */
+    if (hi > UINT32_MAX - 4095u) { sceIoClose(fd); return -6; }
+    hi = (hi + 4095u) & ~4095u;
     uint32_t size = hi - lo;
     const uint32_t heap_size = 8u * 1024u * 1024u;
     if (hi > UINT32_MAX - heap_size) { sceIoClose(fd); return -6; }
@@ -97,5 +100,10 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
     out->heap_base = lo + size;
     out->heap_size = heap_size;
     out->heap_used = 0;
+    out->bridge_size = 1024u * 1024u;
+    out->brk_base = out->heap_base + out->bridge_size;
+    out->brk_size = 6u * 1024u * 1024u;
+    out->stack_base = out->brk_base + out->brk_size;
+    out->stack_size = 1024u * 1024u;
     return 0;
 }

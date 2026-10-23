@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
     DsArmv6Image memory={mapped.image,mapped.image_size+mapped.heap_size,mapped.image_base};
     DsArmv6Cpu cpu;
     ds_armv6_reset(&cpu,entry);
-    cpu.r[13]=mapped.heap_base+mapped.heap_size-16u;
+    cpu.r[13]=mapped.stack_base+mapped.stack_size-16u;
     cpu.r[14]=0xfffffff0u;
     printf("Relocated bounded probe; unsupported imports stop execution; no JNI.\n");
     printf("image_base=0x%08x image_bytes=%u entry=0x%08x heap_bytes=%u\n",

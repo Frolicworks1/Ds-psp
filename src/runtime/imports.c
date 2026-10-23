@@ -13,6 +13,7 @@ static unsigned g_count;
 static DsArmImage *g_image;
 static uint32_t g_ctype_objects[3];
 static uint32_t g_stdio;
+static uint32_t g_errno;
 static uint32_t g_globals[3];
 
 static uint32_t trampoline_for(unsigned id) {
@@ -24,6 +25,7 @@ void ds_imports_init(void) {
     g_count = 0;
     g_image = 0;
     g_stdio = 0;
+    g_errno = 0;
     memset(g_globals, 0, sizeof(g_globals));
     memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
 }
@@ -47,6 +49,7 @@ void ds_imports_bind_image(DsArmImage *image) {
     if (g_image != image) {
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
+        g_errno = 0;
         memset(g_globals, 0, sizeof(g_globals));
     }
     g_image = image;
@@ -69,10 +72,11 @@ static const char *guest_string(uint32_t addr) {
 }
 
 static uint32_t guest_alloc(uint32_t size) {
-    if (!g_image || !size || size > UINT32_MAX - 7u ||
-        g_image->heap_used > g_image->heap_size) return 0;
+    if (!g_image || !size || size > UINT32_MAX - 7u) return 0;
+    uint32_t limit = g_image->bridge_size ? g_image->bridge_size : g_image->heap_size;
+    if (g_image->heap_used > limit) return 0;
     size = (size + 7u) & ~7u;
-    if (size > g_image->heap_size - g_image->heap_used) return 0;
+    if (size > limit - g_image->heap_used) return 0;
     uint32_t p = g_image->heap_base + g_image->heap_used;
     if (p < g_image->heap_base || size > UINT32_MAX - p || !guest_range(p, size)) return 0;
     g_image->heap_used += size;
@@ -301,7 +305,28 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
         dspsp_log("guest stack corruption detected pc=0x%08x", cpu->pc);
         return -33;
     }
-    if (!strncmp(name, "pthread_mutex", 13)) {
+    if (!strcmp(name, "__errno") || !strcmp(name, "sbrk")) {
+        if (!g_image) return -31;
+        if (!g_errno) {
+            g_errno = guest_alloc(4);
+            if (!g_errno) return -31;
+            store32(guest_range(g_errno, 4), 0);
+        }
+        if (!strcmp(name, "__errno")) cpu->r[0] = g_errno;
+        else {
+            /* sbrk takes a signed 32-bit increment and returns the OLD break. */
+            int64_t delta = cpu->r[0] <= INT32_MAX ? (int64_t)cpu->r[0] :
+                            (int64_t)cpu->r[0] - 0x100000000ll;
+            int64_t next = (int64_t)g_image->brk_used + delta;
+            if (!g_image->brk_size || next < 0 || next > g_image->brk_size) {
+                store32(guest_range(g_errno, 4), 12); /* Android ENOMEM */
+                cpu->r[0] = UINT32_MAX;
+            } else {
+                cpu->r[0] = g_image->brk_base + g_image->brk_used;
+                g_image->brk_used = (uint32_t)next;
+            }
+        }
+    } else if (!strncmp(name, "pthread_mutex", 13)) {
         int rc = mutex_call(name, cpu);
         if (rc) {
             dspsp_log("guest mutex stop: %s error=%d pc=0x%08x", name, rc, cpu->pc);

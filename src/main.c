@@ -65,7 +65,7 @@ int main(void) {
         /* Reserve the top of the guest arena as an ARM-compatible stack. */
         DsArmv6Cpu guest_cpu;
         ds_armv6_reset(&guest_cpu, arm_image.entry);
-        guest_cpu.r[13] = arm_image.heap_base + arm_image.heap_size - 16u;
+        guest_cpu.r[13] = arm_image.stack_base + arm_image.stack_size - 16u;
         dspsp_log("guest stack=0x%08X entry=0x%08X", guest_cpu.r[13], guest_cpu.pc);
         int guest_rc = reloc_status ? reloc_status : ds_armv6_run(&guest_cpu, &(DsArmv6Image){
             arm_image.image, arm_image.image_size + arm_image.heap_size, arm_image.image_base

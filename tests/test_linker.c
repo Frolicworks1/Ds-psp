@@ -127,7 +127,13 @@ int main(void) {
     CHECK(ds_import_call(tr+1,&cpu)==-1);
     /* Malformed segment arithmetic is rejected before allocation. */
     fixture(R_ARM_RELATIVE,STT_FUNC); CHECK(apply(&im)==0);
-    DsArmImage loaded; CHECK(ds_arm_loader_load(path,&loaded)==0); ds_arm_loader_unload(&loaded);
+    DsArmImage loaded; CHECK(ds_arm_loader_load(path,&loaded)==0);
+    CHECK(!(loaded.heap_base & 4095) && !(loaded.brk_base & 4095));
+    CHECK(loaded.heap_base+loaded.bridge_size==loaded.brk_base);
+    CHECK(loaded.brk_base+loaded.brk_size==loaded.stack_base);
+    CHECK(loaded.stack_base+loaded.stack_size==loaded.heap_base+loaded.heap_size);
+    CHECK(loaded.brk_used==0 && loaded.heap_used==0);
+    ds_arm_loader_unload(&loaded);
     Elf32_Phdr ph={.p_type=PT_LOAD,.p_vaddr=0xfffffff0,.p_memsz=0x100}; put(sizeof(Elf32_Ehdr),&ph,sizeof(ph));
     CHECK(apply(&im)==-7); CHECK(ds_arm_loader_load(path,&loaded)==-5);
     test_data_imports();

@@ -87,11 +87,31 @@ not reproduced. Bad guest memory or alignment stops before state mutation.
 ## Execution checkpoint
 
 All seven required data globals resolve for the recorded donor. The bounded
-first-constructor probe now reaches `sbrk` at trampoline `0xf00001e8` after
-1,166 successful steps, then stops. No complete constructor, JNI initialization
-or gameplay is established. Next, design the guest program break with explicit
-heap/stack separation and allocation ownership; do not let `sbrk` overlap the
-import bridge's allocations or guest stack.
+first-constructor probe now reaches `mmap` at trampoline `0xf0000264` after
+1,198 successful steps, then stops. No complete constructor, JNI initialization
+or gameplay is established. Next, implement bounded mmap/munmap storage with explicit mapping ownership,
+flags, failure semantics and tests. No mapping support is currently claimed.
 
 ELF PLT stubs that load PC directly dispatch registered imports before instruction
 fetch; synthetic tests cover this path independently of the donor.
+
+## Program break and arena ownership
+
+The loader rounds the mapped ELF span up to a 4096-byte boundary, then appends
+the same 8 MiB arena as before. It now partitions that arena into 1 MiB for bridge
+objects/imported malloc, 6 MiB for the guest program break, and 1 MiB for the
+stack. These are initial diagnostic budgets, not verified gameplay budgets.
+`heap_size` still describes the entire mapped arena; `bridge_size` limits the
+bridge bump allocator. Main and the host probe use the explicit stack range.
+Synthetic images without a partition retain their previous heap-only behavior.
+
+`sbrk` interprets its argument as signed 32-bit, returns the old break, supports
+zero-increment queries and shrinking, and rejects crossing either pool boundary
+with `(void*)-1` and Android ENOMEM (12). `__errno` returns a stable guest address
+for the single execution thread; success preserves an existing errno value.
+Changing the break neither allocates bridge objects nor clears reclaimed bytes.
+Future thread support must replace the single errno slot with thread-local state.
+
+Pool separation prevents allocator overlap; it does not provide memory access
+permissions or a stack guard page. The interpreter still sees a contiguous arena.
+Bridge free/realloc and general memory mapping remain incomplete.
