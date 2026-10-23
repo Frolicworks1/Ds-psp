@@ -1,90 +1,87 @@
 #include <pspkernel.h>
 #include <pspdisplay.h>
-#include <pspgu.h>
+#include <pspdebug.h>
 #include <pspctrl.h>
-#include "runtime/donor_elf.h"
 #include "runtime/runtime.h"
 #include "runtime/log.h"
-#include "runtime/arm_elf.h"
 #include "runtime/arm_loader.h"
 #include "runtime/reloc.h"
 #include "runtime/imports.h"
 #include "cpu/armv6.h"
 
-PSP_MODULE_INFO("DeadSpacePSP", 0, 1, 0);
+PSP_MODULE_INFO("DeadSpaceDiagnostic", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 
-static unsigned int __attribute__((aligned(16))) list[262144];
-static unsigned int __attribute__((aligned(16))) framebuf[512 * 272];
-
-static void init_gu(void) {
-    sceGuInit();
-    sceGuStart(GU_DIRECT, list);
-    sceGuDrawBuffer(GU_PSM_8888, framebuf, 512);
-    sceGuDispBuffer(480, 272, framebuf, 512);
-    sceGuDepthBuffer(framebuf + 480 * 272, 512);
-    sceGuOffset(2048 - 240, 2048 - 136);
-    sceGuViewport(2048, 2048, 480, 272);
-    sceGuScissor(0, 0, 480, 272);
-    sceGuEnable(GU_SCISSOR_TEST);
-    sceGuFinish();
-    sceGuSync(0, 0);
-    sceDisplayWaitVblankStart();
-    sceGuDisplay(GU_TRUE);
+static volatile int exit_requested;
+static int exit_callback(int arg1, int arg2, void *common) {
+    (void)arg1; (void)arg2; (void)common;
+    exit_requested = 1;
+    return 0;
+}
+static int callback_thread(SceSize args, void *argp) {
+    (void)args; (void)argp;
+    int callback = sceKernelCreateCallback("Exit", exit_callback, NULL);
+    if (callback >= 0) sceKernelRegisterExitCallback(callback);
+    sceKernelSleepThreadCB();
+    return 0;
 }
 
 int main(void) {
-    char donor_report[128];
+    pspDebugScreenInit();
+    pspDebugScreenPrintf("Dead Space - Unofficial PSP Port\n");
+    pspDebugScreenPrintf("Diagnostic Test 1 - NOT PLAYABLE\n\n");
+    pspDebugScreenPrintf("No game menu, graphics, audio or gameplay yet.\n");
+    int thread = sceKernelCreateThread("ExitThread", callback_thread, 0x11, 0x1000, 0, NULL);
+    if (thread >= 0) sceKernelStartThread(thread, 0, NULL);
+    sceCtrlSetSamplingCycle(0);
+    sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
     dspsp_runtime_init();
     ds_imports_init();
-    dspsp_log("Dead Space PSP bootstrap starting");
+    dspsp_log("Unofficial PSP Diagnostic Test 1; not playable");
 
     int cpu_test = ds_armv6_selftest();
-    dspsp_log("ARMv6 interpreter self-test=%d", cpu_test);
+    pspDebugScreenPrintf("\nARM CPU self-test: %s (%d)\n", cpu_test ? "FAIL" : "PASS", cpu_test);
+    dspsp_log("ARM CPU self-test=%d", cpu_test);
 
-    DsArmElfInfo elf_info;
-    int elf_probe = ds_arm_elf_probe("ms0:/data/deadspace/guest_libs/libDeadSpace.so", &elf_info);
-    dspsp_log("ARM ELF probe=%d entry=0x%08X base=0x%08X size=%u segments=%u", elf_probe, elf_info.entry, elf_info.image_base, elf_info.image_size, elf_info.load_segments);
-
-    int elf_status = dspsp_inspect_donor(
-        "ms0:/data/deadspace/guest_libs/libDeadSpace.so",
-        donor_report, sizeof(donor_report));
-    dspsp_log("donor status=%d report=%s", elf_status, donor_report);
-
-    DsArmImage arm_image;
-    int load_status = ds_arm_loader_load(
-        "ms0:/data/deadspace/guest_libs/libDeadSpace.so", &arm_image);
-    dspsp_log("ARM image load=%d base=0x%08X size=%u entry=0x%08X segments=%u",
-              load_status, arm_image.image_base, arm_image.image_size,
-              arm_image.entry, arm_image.load_segments);
-    if (load_status == 0) {
-        ds_imports_bind_image(&arm_image);
-        int reloc_status = ds_arm_apply_relocations(
-            "ms0:/data/deadspace/guest_libs/libDeadSpace.so", &arm_image);
-        dspsp_log("ARM self-relocations=%d imports=%u", reloc_status, ds_import_resolve_count());
-        /* Reserve the top of the guest arena as an ARM-compatible stack. */
-        DsArmv6Cpu guest_cpu;
-        ds_armv6_reset(&guest_cpu, arm_image.entry);
-        guest_cpu.r[13] = arm_image.stack_base + arm_image.stack_size - 16u;
-        dspsp_log("guest stack=0x%08X entry=0x%08X", guest_cpu.r[13], guest_cpu.pc);
-        int guest_rc = reloc_status ? reloc_status : ds_armv6_run(&guest_cpu, &(DsArmv6Image){
-            arm_image.image, arm_image.image_size + arm_image.heap_size, arm_image.image_base
-        }, 1u);
-        dspsp_log("guest entry probe rc=%d pc=0x%08X", guest_rc, guest_cpu.pc);
+    /* Optional original library; no game assets or save files are modified. */
+    const char *donor = "ms0:/data/deadspace/guest_libs/libDeadSpace.so";
+    DsArmImage image = {0};
+    int loaded = ds_arm_loader_load(donor, &image);
+    pspDebugScreenPrintf("Donor load: %d\n", loaded);
+    dspsp_log("donor load=%d image_bytes=%u arena_bytes=%u", loaded, image.image_size, image.heap_size);
+    if (!loaded) {
+        ds_imports_bind_image(&image);
+        int relocated = ds_arm_apply_relocations(donor, &image);
+        pspDebugScreenPrintf("Linking: %d; imports: %u\n", relocated, ds_import_resolve_count());
+        dspsp_log("relocation=%d imports=%u", relocated, ds_import_resolve_count());
+        if (!relocated && !cpu_test) {
+            DsArmv6Cpu cpu;
+            ds_armv6_reset(&cpu, image.entry);
+            cpu.r[13] = image.stack_base + image.stack_size - 16u;
+            DsArmv6Image memory = {image.image, image.image_size + image.heap_size, image.image_base};
+            int rc = ds_armv6_run(&cpu, &memory, 1);
+            pspDebugScreenPrintf("One-instruction probe: %d, PC %08X\n", rc, (unsigned)cpu.pc);
+            dspsp_log("single-step rc=%d pc=%08X", rc, (unsigned)cpu.pc);
+        }
+    } else if (loaded == -2) {
+        pspDebugScreenPrintf("Optional game library not found.\n");
+        pspDebugScreenPrintf("CPU/screen test can run without game data.\n");
+    } else {
+        pspDebugScreenPrintf("Library rejected or insufficient memory.\n");
     }
-
-    init_gu();
-    dspsp_log("GU initialized; waiting for HOME");
-
-    SceCtrlData pad;
-    while (1) {
+    ds_imports_bind_image(NULL);
+    ds_arm_loader_unload(&image);
+    pspDebugScreenPrintf("\nThis test does NOT initialize the game.\n");
+    pspDebugScreenPrintf("Log (if writable):\nms0:/PSP/GAME/DEADSPACE/psp_port.log\n");
+    pspDebugScreenPrintf("\nPlease report your PSP model / PPSSPP version,\n");
+    pspDebugScreenPrintf("a photo of this screen, and the log.\n\n");
+    pspDebugScreenPrintf("Press START to exit.\n");
+    while (!exit_requested) {
+        SceCtrlData pad = {0};
         sceCtrlPeekBufferPositive(&pad, 1);
-        if (pad.Buttons & PSP_CTRL_HOME) break;
+        if (pad.Buttons & PSP_CTRL_START) break;
         sceDisplayWaitVblankStart();
     }
-
-    sceGuTerm();
-    ds_arm_loader_unload(&arm_image);
     dspsp_runtime_shutdown();
     sceKernelExitGame();
     return 0;
