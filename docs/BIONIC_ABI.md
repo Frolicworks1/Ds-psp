@@ -323,7 +323,7 @@ These implement single-thread semantics only; spawning threads is still gated.
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
 NativeOnDrawFrame passes EAIO/MainActivity metadata lookup and stops at
-CallStaticVoidMethodV for EAIO.Startup (JNI slot 142), when assets are mounted. Before initialization completes,
+FindClass("java/io/InputStream") inside native EAIO.Startup, when assets are mounted. Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
 
 
@@ -342,11 +342,11 @@ not implemented yet.
 
 GetStaticMethodID matches the exact EAIO class, name and descriptor for native
 `Startup(Landroid/content/res/AssetManager;)V` and `Shutdown()V`. IDs are stable
-and separate from object references. This is method metadata only: invoking those
-methods remains unsupported until the asset-manager/native-call bridge exists.
+and separate from object references. Startup dispatches to its validated native export when explicitly bound; Shutdown
+invocation remains unsupported.
 Unknown classes/method signatures trap; no dummy asset manager or successful
-file operation is returned. First-draw progress with mounted assets is 166 interpreter steps before
-EAIO.Startup invocation, 10,851 total including constructors and lifecycle.
+file operation is returned. First-draw progress with mounted assets is 186 interpreter steps before
+InputStream class lookup, 10,871 total including constructors and lifecycle.
 The JNI arena reservation now uses 2,864 total bridge bytes;
 the total mapped arena remains 30,285,824 bytes with zero allocation failures.
 
@@ -373,7 +373,7 @@ reading unused argument pointers. Duplicate platform starts fail; reference-tabl
 exhaustion leaves start retryable. Deleting local handles does not clear the
 singleton. Rebinding the image resets it. Activity teardown/recreation within one
 image remain unsupported. getAssets requires an explicitly mounted asset root.
-The startup-controls trace with assets reaches 10,971 steps; early input callbacks remain
+The startup-controls trace with assets reaches 10,991 steps; early input callbacks remain
 gated by incomplete game initialization.
 
 ### Extracted asset backend
@@ -400,7 +400,27 @@ mount it stops. The native probe accepts an optional final assets-directory:
 probe_guest guest.so startup 100000 18 /path/to/extracted/assets
 ```
 
-With it, the donor next invokes EAIO.Startup through JNI slot142. Native JNI
-callback dispatch, Java strings/arrays and AssetManager/InputStream operations
-are not wired yet; no game-issued file read or rendered frame is claimed. The
+With it, the donor invokes EAIO.Startup through JNI slot142 and reaches
+InputStream class lookup. Java strings/arrays and AssetManager/InputStream
+operations are not wired yet; no game-issued file read or rendered frame is claimed. The
 PSP diagnostic entry point remains unchanged.
+
+### Native EAIO call bridge
+
+The probe resolves `Java_com_ea_EAIO_EAIO_Startup` through the existing ELF
+export validator, then explicitly binds it. The bridge checks image bounds and
+ARM/Thumb alignment again. CallStaticVoidMethod/V/A accept only the exact EAIO
+Startup ID, EAIO class and a live asset-manager reference. The ARM32 V form
+reads one 4-byte object argument; A validates an 8-byte jvalue; direct calls use
+r3. Invalid pointers, wrong objects and unbound native targets stop.
+
+Dispatch sets guest r2 to the asset manager and PC/mode to the native entry,
+preserving env/class, LR, SP and callee-saved registers. The existing interpreter
+executes the native code; return resumes the original JNI caller. Tests execute
+real ARM and Thumb BX LR instructions for all three call forms. No nested host
+interpreter is introduced. Native targets reset on image rebinding.
+
+EAIO's next GetJavaVM call writes the existing VM pointer to a checked, aligned
+guest output and returns JNI_OK. The donor then requests java/io/InputStream;
+that class still stops explicitly. Native Startup has entered but has not yet
+returned. Automatic JNI local-frame cleanup remains unimplemented as above.

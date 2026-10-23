@@ -27,6 +27,8 @@ int main(void) {
  cpu.r[0]=vm;cpu.r[2]=42;CHECK(!ds_import_call(getenv,&cpu) && cpu.r[0]==(uint32_t)-3 && read32(0x1000)==0);
  cpu.r[0]=vm;cpu.r[1]=0x2fff;CHECK(ds_import_call(getenv,&cpu)==-31);
  CHECK(!call(4,0,0,0) && cpu.r[0]==0x10006);
+ CHECK(!call(219,0x1380,0,0) && !cpu.r[0] && read32(0x1380)==vm);
+ CHECK(call(219,0x2fff,0,0)==-31 && call(219,0x1381,0,0)==-31);
  strcpy((char*)mem,"com/ea/EAIO/EAIO");
  strcpy((char*)mem+64,"Startup");strcpy((char*)mem+128,"(Landroid/content/res/AssetManager;)V");
  strcpy((char*)mem+192,"Shutdown");strcpy((char*)mem+256,"()V");
@@ -102,6 +104,34 @@ int main(void) {
  CHECK(call(35,activity,assetsMethod,0)==-32);
  CHECK(call(35,receiver,instanceMethod,0)==-32);
  CHECK(call(35,0,assetsMethod,0)==-31);
+ CHECK(ds_imports_bind_eaio_startup(0)==-31);
+ CHECK(ds_imports_bind_eaio_startup(0x1002)==-31);
+ CHECK(ds_imports_bind_eaio_startup(0x2000)==-31); /* bridge is not code */
+ CHECK(ds_imports_bind_eaio_startup(0x0fff)==-31);
+ CHECK(!ds_imports_bind_eaio_startup(0x1800));
+ CHECK(call(142,eaio,startup,0x2fff)==-31);
+ CHECK(call(142,eaio,startup,0x1301)==-31);
+ CHECK(call(141,activity,startup,manager)==-32);
+ CHECK(call(141,eaio,shutdown,manager)==-32);
+ CHECK(call(141,eaio,startup,receiver)==-31);
+ for(unsigned thumb=0;thumb<2;++thumb) {
+  CHECK(!ds_imports_bind_eaio_startup(0x1800+thumb));
+  for(unsigned slot=141;slot<=143;++slot) {
+   memcpy(mem+768,&manager,4);memset(mem+772,0xff,4);
+   cpu=(DsArmv6Cpu){0};cpu.r[0]=env;cpu.r[1]=eaio;cpu.r[2]=startup;
+   cpu.r[3]=slot==141?manager:0x1300;cpu.r[13]=0x1f00;cpu.r[14]=0x4001;
+   for(unsigned i=4;i<=11;++i)cpu.r[i]=0x12340000+i;
+   CHECK(!ds_import_call(read32(read32(env)+slot*4),&cpu));
+   CHECK(cpu.pc==0x1800 && cpu.thumb==thumb && cpu.r[0]==env && cpu.r[1]==eaio && cpu.r[2]==manager);
+   CHECK(cpu.r[13]==0x1f00 && cpu.r[14]==0x4001);
+   for(unsigned i=4;i<=11;++i)CHECK(cpu.r[i]==0x12340000+i);
+   uint32_t code=thumb?0x4770:0xe12fff1e; /* BX LR */
+   memcpy(mem+0x800,&code,4);
+   DsArmv6Image memory={mem,sizeof(mem),0x1000};
+   CHECK(!ds_armv6_step(&cpu,&memory));
+   CHECK(cpu.pc==0x4000 && cpu.thumb && cpu.r[13]==0x1f00);
+  }
+ }
  CHECK(!call(22,manager,0,0));
  CHECK(!rmdir(assetRoot));
  CHECK(!call(23,receiver,0,0)); /* singleton survives handle deletion */
@@ -118,10 +148,11 @@ int main(void) {
  CHECK(call(115,activity,instanceMethod,0)==-32);
  for(unsigned i=0;i<64;++i)CHECK(!call(23,refs[i],0,0));
  CHECK(!call(6,0x1000,0,0) && im.heap_used==used);
- CHECK(call(141,cpu.r[0],startup,0)==-32); /* lookup is not method execution */
+ CHECK(call(141,cpu.r[0],startup,0)==-31); /* null asset argument rejected */
  cpu.r[0]=vm;CHECK(ds_import_call(version,&cpu)==-31);
  ds_imports_bind_image(NULL);CHECK(!ds_import_is_trampoline(getenv));
  CHECK(ds_imports_start_activity(&receiver)==-31 && !receiver);
+ CHECK(ds_imports_bind_eaio_startup(0x1800)==-31);
  ds_imports_bind_image(&im);im.heap_used=0;
  CHECK(!ds_imports_prepare_jni(&vm,&env));
  CHECK(!call(6,0x1180,0,0));activity=cpu.r[0];

@@ -39,4 +39,8 @@ int ds_imports_start_activity(uint32_t *activity);
 /* Mount a trusted extracted APK assets directory after JNI preparation. */
 int ds_imports_mount_assets(const char *root);
 
+/* Bind the exact EAIO.Startup export after ds_arm_find_export validates its
+ * executable ELF range. This additional gate checks mapped bounds/alignment. */
+int ds_imports_bind_eaio_startup(uint32_t target);
+
 #endif

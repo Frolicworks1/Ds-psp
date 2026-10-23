@@ -121,8 +121,10 @@ int main(int argc, char **argv) {
             if (!status && result!=0x10004 && result!=0x10006) status=2;
             printf("JNI_OnLoad result=%08x status=%d\n",result,status);
         }
-        if (!status && argc==6 && ds_imports_mount_assets(argv[5])) {
-            fprintf(stderr,"Cannot mount asset directory\n");status=1;
+        if (!status && argc==6 && (ds_imports_mount_assets(argv[5]) ||
+            ds_arm_find_export(argv[1],&mapped,"Java_com_ea_EAIO_EAIO_Startup",&target) ||
+            ds_imports_bind_eaio_startup(target))) {
+            fprintf(stderr,"Cannot prepare asset directory/native EAIO export\n");status=1;
         }
         if (!status) {
             if (ds_imports_start_activity(&activity) ||

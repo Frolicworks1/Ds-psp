@@ -25,6 +25,7 @@ static uint32_t g_jvm,g_jenv,g_jrefs;
 enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY, JNI_OBJECT_ASSETS };
 static DsAssets g_assets;
 static unsigned g_activity_started;
+static uint32_t g_eaio_startup;
 /* Object identity is distinct from the lifetime of each local/global handle. */
 static struct { unsigned object,global; } g_jref[JNI_REF_MAX];
 #define JNI_TRAMP_BASE 0xf1000000u
@@ -53,6 +54,7 @@ void ds_imports_init(void) {
     g_errno = 0;
     g_jvm = g_jenv = g_jrefs = 0;
     g_activity_started = 0;
+    g_eaio_startup = 0;
     memset(g_jref,0,sizeof(g_jref));
     memset(g_mapped, 0, sizeof(g_mapped));
     memset(&g_memory_stats, 0, sizeof(g_memory_stats));
@@ -84,6 +86,7 @@ void ds_imports_bind_image(DsArmImage *image) {
         g_errno = 0;
         g_jvm = g_jenv = g_jrefs = 0;
         g_activity_started = 0;
+        g_eaio_startup = 0;
         memset(g_jref,0,sizeof(g_jref));
         memset(g_mapped, 0, sizeof(g_mapped));
         memset(&g_memory_stats, 0, sizeof(g_memory_stats));
@@ -177,6 +180,17 @@ int ds_imports_mount_assets(const char *root) {
     return ds_assets_mount(&g_assets,root);
 }
 
+int ds_imports_bind_eaio_startup(uint32_t target) {
+    uint32_t address=target&~1u;
+    unsigned width=(target&1)?2u:4u;
+    if (!g_jenv || !target || (!(target&1) && (target&3)) ||
+        address<g_image->image_base ||
+        address-g_image->image_base>g_image->image_size ||
+        width>g_image->image_size-(address-g_image->image_base)) return -31;
+    g_eaio_startup=target;
+    return 0;
+}
+
 static int jni_trampoline(uint32_t addr) {
     return g_jvm && addr>=JNI_TRAMP_BASE && addr<JNI_TRAMP_BASE+(JNI_VM_SLOTS+JNI_ENV_SLOTS)*4 && !(addr&3);
 }
@@ -240,6 +254,30 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
                 int rc=jni_new_ref(JNI_OBJECT_ACTIVITY,0,&cpu->r[0]);
                 if (rc) return rc;
             }
+        } else if (slot>=141 && slot<=143) { /* CallStaticVoidMethod[/V/A] */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0) return -31;
+            if (g_jref[i].object!=JNI_CLASS_EAIO ||
+                cpu->r[2]!=g_jrefs+JNI_REF_MAX*4 || !g_eaio_startup) return -32;
+            uint32_t manager=cpu->r[3];
+            if (slot!=141) {
+                /* ARM32 va_list points to words; jvalue occupies 8 bytes. */
+                const uint8_t *args=guest_range(manager,slot==142?4:8);
+                if (!args || (manager&3)) return -31;
+                manager=load32(args);
+            }
+            int object=jni_ref_index(manager);
+            if (object<0 || g_jref[object].object!=JNI_OBJECT_ASSETS) return -31;
+            /* Tail-dispatch into the real guest native function. Preserve LR,
+             * SP and callee-saved registers; its return resumes the JNI caller.
+             * No recursive interpreter or fabricated native success. */
+            cpu->r[2]=manager;
+            cpu->pc=g_eaio_startup&~1u;cpu->thumb=g_eaio_startup&1;
+            return 0;
+        } else if (slot==219) { /* GetJavaVM */
+            uint8_t *out=guest_range(cpu->r[1],4);
+            if (!out || (cpu->r[1]&3)) return -31;
+            store32(out,g_jvm);cpu->r[0]=0;
         } else if (slot==232) { /* GetObjectRefType, invalid/null -> JNIInvalidRefType */
             int i=jni_ref_index(cpu->r[1]);
             cpu->r[0]=i<0?0:g_jref[i].global?2:1;

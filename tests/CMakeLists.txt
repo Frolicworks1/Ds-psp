@@ -145,3 +145,7 @@ if(DSPSP_SANITIZE)
     target_link_options(test_assets PRIVATE -fsanitize=address,undefined)
 endif()
 add_test(NAME asset_streams COMMAND test_assets)
+
+# Exercise native JNI dispatch through real ARM and Thumb return instructions.
+target_sources(test_jni PRIVATE ../src/cpu/armv6.c)
+target_link_libraries(test_jni PRIVATE ds_softfloat)
