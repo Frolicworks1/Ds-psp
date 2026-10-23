@@ -14,6 +14,8 @@ link_directories("${PSP_SDK}/lib")
 
 add_executable(EBOOT.ELF
     src/main.c
+    src/input/controls.c
+    src/input/controls_psp.c
     src/runtime/donor_elf.c
     src/runtime/log.c
     src/runtime/data.c

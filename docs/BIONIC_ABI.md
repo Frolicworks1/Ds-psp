@@ -299,3 +299,29 @@ Unicorn comparisons cover supported addressing modes. No new gameplay claim.
 
 ABI sources: AOSP Bionic `android-2.3.7_r1` headers, `libc/bionic/semaphore.c`
 and `libc/arch-arm/bionic/atomics_arm.S`; ARM C++ ABI guard-object layout.
+
+
+## JNI bootstrap and lifecycle exports
+
+The bounded export resolver reads public function symbols from SHT_DYNSYM and its
+linked string table. It retains the Thumb bit and rejects invalid names, section
+indices, targets outside the mapped image or executable file-backed PT_LOAD
+ranges, and unaligned ARM entries. Sectionless ELF lookup remains unsupported.
+
+The guest JavaVM/JNIEnv are actual pointer-to-table objects in the bridge arena.
+Reserved slots are zero; callable slots point into a separate interpreter trap
+range. GetEnv validates the VM/output pointer and returns JNI_EVERSION with a null
+output for unsupported versions. GetVersion reports JNI 1.6. The one current guest
+thread is attached; attach/detach, class/object/member and all other unimplemented
+methods trap. Tables reset on image rebinding and do not consume the libc import
+registry's remaining slots. No host pointer is placed into guest memory.
+
+`__atomic_inc` and `__atomic_dec` now return the old 32-bit word and wrap the stored
+value, matching historical Bionic ARM atomics. `pthread_self` returns thread ID 1,
+consistent with existing mutex ownership; `pthread_equal` compares these IDs.
+These implement single-thread semantics only; spawning threads is still gated.
+
+All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
+change, keyboard visibility and window focus complete in the host startup probe.
+NativeOnDrawFrame stops at FindClass("com/ea/EAIO/EAIO"). Before that completes,
+original input callbacks return early; callback returns are not gameplay evidence.

@@ -31,12 +31,12 @@ binaries/assets and personal saves out of commits.
 
 | Stage | Work | Acceptance gate | Current state |
 | --- | --- | --- | --- |
-| M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and 13 CPU groups pass locally; physical/emulator boot not yet verified |
+| M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and host regression checks pass locally; physical/emulator boot not yet verified |
 | M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; all 208 constructors return in the host probe; device/JNI startup and full ELF validation remain open |
 | M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter; required scalar VFP arithmetic/conversions, long multiply and transfers tested against Unicorn; other instructions remain gated |
-| M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Unimplemented beyond a few memory/string imports |
+| M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Host constructors, JNI_OnLoad, activity/surface/visibility/focus callbacks return; first draw stops at EAIO FindClass (JNI slot 6) |
 | M4: first genuine frame | Map exercised GLES 1.x functions to GU/GUM; handle state, geometry, textures, formats and render targets | Original game produces a recognizable menu/loading frame; captures and logs confirm real guest rendering; no fabricated image | Not reached |
-| M5: interactive menu | PSP analog/buttons mapped to original events; lifecycle/focus, audio decoding/output and timing | Menu navigation, audible output, pause/resume and input work repeatedly; teardown is clean | Not reached |
+| M5: interactive menu | PSP analog/buttons mapped to original events; lifecycle/focus, audio decoding/output and timing | Menu navigation, audible output, pause/resume and input work repeatedly; teardown is clean | Input translator and PSP polling adapter implemented; game input remains gated by incomplete first-frame initialization |
 | M6: playable slice | Start a level, movement/aim/shoot, enemy/game logic, HUD, saving and loading | A documented gameplay scenario and save/reload pass; no required unimplemented import on the tested path | Not reached |
 | M7: memory and speed | Measure CPU/GPU/audio time and memory by scene; optimize hotspots, caching/translation and asset streaming | Recorded frame times, peak memory and audio underruns on declared PSP models; agreed playability target met without corrupting behavior | Performance unknown; no success forecast |
 | M8: release checks | Test multiple scenes, transitions, death/restart, languages, save errors, missing/corrupt data; package reproducibly | Device/PPSSPP evidence, artifact hashes, setup instructions, compatibility matrix and explicit limitations accompany the original-game build | Not reached |
@@ -135,3 +135,28 @@ connect JNI/lifecycle startup, implement required asset access, add memory-acces
 guards and measure the full startup budget. Shutdown execution and complete ELF
 validation remain open. Keep the original Diagnostic Test 1 available for the
 user's pending PPSSPP boot test.
+
+
+## JNI/lifecycle and input checkpoint
+
+`probe_guest <donor.so> startup 100000 18` preserves constructor state and resolves
+public lifecycle exports from the ELF dynamic symbol table. Guest JavaVM/JNIEnv
+tables use 32-bit guest addresses, separate trap ranges and bounded allocations.
+GetEnv negotiates the version for the single attached guest thread; unsupported
+JNI methods stop and report their slot instead of returning fabricated objects.
+JNI_OnLoad returns 1.4; activity creation, surface creation/change, keyboard
+visibility and window focus return. The first draw call stops at JNIEnv slot 6
+(FindClass), requesting `com/ea/EAIO/EAIO`. Java class/object/asset behavior is the
+next required startup work. None of these host callbacks renders a real frame.
+
+`startup-controls` additionally marshals a small movement/camera/aim/release
+sequence into the original input callbacks. All eight callbacks return, but the
+donor's initialization predicate rejects input at this stage; this does **not**
+prove queueing or gameplay. [Control layout](CONTROLS.md) records the user's
+analog/face-button preference, remaining actions and unimplemented menu/motion
+controls. The diagnostic EBOOT keeps its original screen/START-exit contract.
+
+Beta 1 still requires a genuine menu/frame, audio, a playable level, all controls,
+save/reload, performance/memory measurements and PPSSPP/device evidence. GitHub
+Release publication was previously rejected by the managed task runtime; no
+alternate API or release-publishing workflow is used to bypass that restriction.

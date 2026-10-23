@@ -28,4 +28,7 @@ unsigned ds_import_resolve_count(void);
 int ds_import_is_trampoline(uint32_t guest_addr);
 int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu);
 
+/* Allocate bounded guest JavaVM/JNIEnv tables; unsupported slots trap. */
+int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env);
+
 #endif

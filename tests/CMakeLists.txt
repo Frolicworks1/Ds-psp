@@ -15,7 +15,7 @@ foreach(group selftest fetch_bounds flags_only arithmetic_flags carry_arithmetic
 endforeach()
 
 # Optional local investigation; proprietary inputs are never required by CTest/CI.
-add_executable(probe_guest probe_guest.c ../src/cpu/armv6.c ../src/runtime/arm_loader.c
+add_executable(probe_guest probe_guest.c ../src/input/controls.c ../src/cpu/armv6.c ../src/runtime/arm_loader.c
     ../src/runtime/reloc.c ../src/runtime/imports.c host/log.c)
 target_include_directories(probe_guest PRIVATE host)
 target_compile_options(probe_guest PRIVATE -Wall -Wextra -Werror -Wpedantic)
@@ -117,3 +117,18 @@ if(DSPSP_SANITIZE)
     target_link_options(test_clock_psp PRIVATE -fsanitize=address,undefined)
 endif()
 add_test(NAME clock_psp_adapter COMMAND test_clock_psp)
+
+add_executable(test_controls test_controls.c ../src/input/controls.c)
+add_executable(test_jni test_jni.c ../src/runtime/imports.c host/log.c)
+add_executable(test_exports test_exports.c ../src/runtime/reloc.c ../src/runtime/imports.c host/log.c)
+target_include_directories(test_exports PRIVATE host)
+foreach(startup_target test_controls test_jni test_exports)
+    target_compile_options(${startup_target} PRIVATE -Wall -Wextra -Werror -Wpedantic)
+    if(DSPSP_SANITIZE)
+        target_compile_options(${startup_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${startup_target} PRIVATE -fsanitize=address,undefined)
+    endif()
+endforeach()
+add_test(NAME controls COMMAND test_controls)
+add_test(NAME jni_tables COMMAND test_jni)
+add_test(NAME export_resolution COMMAND test_exports)

@@ -27,9 +27,9 @@ def fixture(second_expected=2, array_size=16, array=0x1180, init=0x1200):
 with tempfile.TemporaryDirectory(prefix='ds-init-') as tmp:
     path = pathlib.Path(tmp) / 'fixture.so'
 
-    def run(data, limit='7'):
+    def run(data, limit='7', mode='constructors'):
         path.write_bytes(data)
-        result = subprocess.run([sys.argv[1], str(path), 'constructors', limit], capture_output=True, text=True)
+        result = subprocess.run([sys.argv[1], str(path), mode, limit], capture_output=True, text=True)
         assert 'AddressSanitizer' not in result.stderr and 'runtime error:' not in result.stderr, result.stderr
         return result
 
@@ -51,4 +51,38 @@ with tempfile.TemporaryDirectory(prefix='ds-init-') as tmp:
     struct.pack_into('<II', data, 0x118, 1, 0)  # No DT_NULL terminator.
     r = run(data)
     assert r.returncode == 1 and 'loader error=-11' in r.stderr, r.stderr
+    # Public exports and a state-dependent lifecycle: missing/failed stages must
+    # stop the runner, and JNI_OnLoad's return version must be checked.
+    data = fixture() + bytearray(2048)
+    struct.pack_into('<II', data, 52+16, len(data), len(data))
+    struct.pack_into('<I', data, 32, 0x800)  # section table
+    struct.pack_into('<HH', data, 46, 40, 4)
+    names=['JNI_OnLoad', 'Java_com_ea_blast_MainActivity_NativeOnCreate',
+           'Java_com_ea_blast_AndroidRenderer_NativeOnSurfaceCreated',
+           'Java_com_ea_blast_AndroidRenderer_NativeOnSurfaceChanged',
+           'Java_com_ea_blast_KeyboardAndroid_NativeOnVisibilityChanged',
+           'Java_com_ea_blast_MainActivity_NativeOnWindowFocusChanged',
+           'Java_com_ea_blast_AndroidRenderer_NativeOnDrawFrame']
+    strings=bytearray(b'\0')
+    for i,name in enumerate(names):
+        offset=0xc00+i*0x40
+        if not i:
+            code=[0xe3a00801,0xe2800004,0xe12fff1e] # JNI_VERSION_1_4
+        else:
+            code=[0xe59f1018,0xe5910000,0xe3500000|(i+2),0x1f000000,
+                  0xe2800001,0xe5810000,0xe12fff1e,0xe1a00000,0x1700]
+        struct.pack_into('<'+'I'*len(code),data,offset,*code)
+        struct.pack_into('<IIIBBH',data,0x900+(i+1)*16,len(strings),0x1000+offset,len(code)*4,0x12,0,3)
+        strings.extend(name.encode()+b'\0')
+    data[0xa00:0xa00+len(strings)]=strings
+    struct.pack_into('<10I',data,0x800+40,0,11,0,0,0x900,8*16,2,0,4,16)
+    struct.pack_into('<10I',data,0x800+80,0,3,0,0,0xa00,len(strings),0,0,1,0)
+    r=run(data,'100','startup')
+    assert r.returncode==0 and 'JNI_OnLoad result=00010004 status=0' in r.stdout and 'stage=4 status=0' in r.stdout, r.stdout+r.stderr
+    bad=data.copy();struct.pack_into('<I',bad,0xc00,0xe3a00000) # wrong JNI version
+    r=run(bad,'100','startup')
+    assert r.returncode==2 and 'STARTUP NativeOnCreate' not in r.stdout, r.stdout
+    bad=data.copy();struct.pack_into('<I',bad,0xc80,0xef000000) # surface-create failure
+    r=run(bad,'100','startup')
+    assert r.returncode==2 and 'NativeOnSurfaceChanged entry=' not in r.stdout, r.stdout
 print('initializer metadata, DT_INIT order, shared state, skips, bounds and fail-fast checks passed')

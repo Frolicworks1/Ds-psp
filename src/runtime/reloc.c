@@ -143,3 +143,57 @@ done:
     sceIoClose(c.fd);
     return rc;
 }
+
+
+int ds_arm_find_export(const char *path,const DsArmImage *image,const char *name,uint32_t *address) {
+    if (!path || !image || !image->image || !name || !address) return -1;
+    *address=0;
+    SceUID fd=sceIoOpen(path,PSP_O_RDONLY,0);
+    if (fd<0) return -1;
+    int result=-1; Elf32_Ehdr eh; Elf32_Phdr ph[32];
+    if (read_at(fd,0,&eh,sizeof(eh)) || memcmp(eh.e_ident,ELFMAG,SELFMAG) ||
+        eh.e_ident[EI_CLASS]!=ELFCLASS32 || eh.e_ident[EI_DATA]!=ELFDATA2LSB ||
+        eh.e_machine!=EM_ARM || eh.e_shentsize!=sizeof(Elf32_Shdr) ||
+        !eh.e_shnum || eh.e_shnum>1024 || eh.e_phentsize!=sizeof(Elf32_Phdr) ||
+        !eh.e_phnum || eh.e_phnum>32 ||
+        read_at(fd,eh.e_phoff,ph,eh.e_phnum*sizeof(*ph))) goto done;
+    result=-2;
+    for (unsigned i=0;i<eh.e_shnum;++i) {
+        Elf32_Shdr sh,strings;
+        if (read_at(fd,(SceOff)eh.e_shoff+i*sizeof(sh),&sh,sizeof(sh))) {result=-1;break;}
+        if (sh.sh_type!=SHT_DYNSYM) continue;
+        if (sh.sh_entsize!=sizeof(Elf32_Sym) || sh.sh_size%sizeof(Elf32_Sym) ||
+            sh.sh_size/sizeof(Elf32_Sym)>65536 || sh.sh_link>=eh.e_shnum ||
+            read_at(fd,(SceOff)eh.e_shoff+sh.sh_link*sizeof(sh),&strings,sizeof(strings)) ||
+            strings.sh_type!=SHT_STRTAB) {result=-1;break;}
+        for (unsigned j=0;j<sh.sh_size/sizeof(Elf32_Sym);++j) {
+            Elf32_Sym sym; char symbol[256]; unsigned k;
+            if (read_at(fd,(SceOff)sh.sh_offset+j*sizeof(sym),&sym,sizeof(sym))) {result=-1;goto done;}
+            if (sym.st_shndx==SHN_UNDEF || ELF32_ST_TYPE(sym.st_info)!=STT_FUNC ||
+                (ELF32_ST_BIND(sym.st_info)!=STB_GLOBAL && ELF32_ST_BIND(sym.st_info)!=STB_WEAK) ||
+                (ELF32_ST_VISIBILITY(sym.st_other)!=STV_DEFAULT && ELF32_ST_VISIBILITY(sym.st_other)!=STV_PROTECTED)) continue;
+            if (sym.st_name>=strings.sh_size) {result=-1;goto done;}
+            for (k=0;k<sizeof(symbol) && k<strings.sh_size-sym.st_name;++k) {
+                if (read_at(fd,(SceOff)strings.sh_offset+sym.st_name+k,&symbol[k],1)) {result=-1;goto done;}
+                if (!symbol[k]) break;
+            }
+            if (k==sizeof(symbol) || k==strings.sh_size-sym.st_name) {result=-1;goto done;}
+            if (strcmp(symbol,name)) continue;
+            uint32_t target=sym.st_value&~1u;
+            uint32_t bytes=sym.st_size?sym.st_size:((sym.st_value&1)?2u:4u);
+            if (sym.st_shndx>=eh.e_shnum || target<image->image_base ||
+                target-image->image_base>=image->image_size ||
+                (!(sym.st_value&1) && (target&3)) || bytes>image->image_size-(target-image->image_base)) {result=-1;goto done;}
+            for (unsigned n=0;n<eh.e_phnum;++n) {
+                if (ph[n].p_type==PT_LOAD && (ph[n].p_flags&PF_X) && target>=ph[n].p_vaddr &&
+                    (uint64_t)target-ph[n].p_vaddr<ph[n].p_filesz &&
+                    bytes<=ph[n].p_filesz-(target-ph[n].p_vaddr)) {
+                    *address=sym.st_value;result=0;goto done;
+                }
+            }
+            result=-1;goto done;
+        }
+    }
+ done:
+    sceIoClose(fd); return result;
+}

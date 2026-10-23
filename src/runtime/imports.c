@@ -18,6 +18,11 @@ static DsArmImage *g_image;
 static uint32_t g_ctype_objects[3];
 static uint32_t g_stdio;
 static uint32_t g_errno;
+static uint32_t g_jvm,g_jenv;
+#define JNI_TRAMP_BASE 0xf1000000u
+#define JNI_ENV_SLOTS 233u
+#define JNI_VM_SLOTS 8u
+
 #define MMAP_PAGES (DS_ARM_MAX_MMAP_BYTES / 4096u)
 static uint8_t g_mapped[MMAP_PAGES];
 static DsGuestMemoryStats g_memory_stats;
@@ -37,6 +42,7 @@ void ds_imports_init(void) {
     g_image = 0;
     g_stdio = 0;
     g_errno = 0;
+    g_jvm = g_jenv = 0;
     memset(g_mapped, 0, sizeof(g_mapped));
     memset(&g_memory_stats, 0, sizeof(g_memory_stats));
     memset(g_globals, 0, sizeof(g_globals));
@@ -64,6 +70,7 @@ void ds_imports_bind_image(DsArmImage *image) {
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
         g_errno = 0;
+        g_jvm = g_jenv = 0;
         memset(g_mapped, 0, sizeof(g_mapped));
         memset(&g_memory_stats, 0, sizeof(g_memory_stats));
         memset(g_globals, 0, sizeof(g_globals));
@@ -106,6 +113,46 @@ static void store32(uint8_t *p, uint32_t value) {
 static uint32_t load32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env) {
+    if (!vm || !env || !g_image) return -1;
+    *vm=*env=0;
+    if (!g_jvm) {
+        unsigned bytes=(2+JNI_VM_SLOTS+JNI_ENV_SLOTS)*4;
+        uint32_t addr=guest_alloc(bytes);
+        if (!addr) return -1;
+        uint8_t *p=guest_range(addr,bytes); memset(p,0,bytes);
+        store32(p,addr+8); store32(p+4,addr+8+JNI_VM_SLOTS*4);
+        for (unsigned i=3;i<JNI_VM_SLOTS;++i) store32(p+8+i*4,JNI_TRAMP_BASE+i*4);
+        for (unsigned i=4;i<JNI_ENV_SLOTS;++i)
+            store32(p+8+(JNI_VM_SLOTS+i)*4,JNI_TRAMP_BASE+(JNI_VM_SLOTS+i)*4);
+        g_jvm=addr;g_jenv=addr+4;
+    }
+    *vm=g_jvm;*env=g_jenv; return 0;
+}
+
+static int jni_trampoline(uint32_t addr) {
+    return g_jvm && addr>=JNI_TRAMP_BASE && addr<JNI_TRAMP_BASE+(JNI_VM_SLOTS+JNI_ENV_SLOTS)*4 && !(addr&3);
+}
+static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
+    unsigned slot=(addr-JNI_TRAMP_BASE)/4;
+    if (slot<JNI_VM_SLOTS) {
+        if (cpu->r[0]!=g_jvm) return -31;
+        if (slot==6) { /* JavaVM.GetEnv: this single guest thread is attached. */
+            uint8_t *out=guest_range(cpu->r[1],4);if (!out) return -31;
+            uint32_t version=cpu->r[2];
+            if (version!=0x10001 && version!=0x10002 && version!=0x10004 && version!=0x10006) {
+                store32(out,0);cpu->r[0]=(uint32_t)-3; /* JNI_EVERSION */
+            } else {store32(out,g_jenv);cpu->r[0]=0;}
+        } else { dspsp_log("unsupported JavaVM slot=%u",slot);return -32; }
+    } else {
+        slot-=JNI_VM_SLOTS;
+        if (cpu->r[0]!=g_jenv) return -31;
+        if (slot==4) cpu->r[0]=0x10006; /* GetVersion */
+        else {dspsp_log("unsupported JNIEnv slot=%u",slot);return -32;}
+    }
+    cpu->pc=cpu->r[14]&~1u;cpu->thumb=cpu->r[14]&1;return 0;
 }
 
 /* ARM mmap: arguments 5/6 (fd/offset) are at SP and SP+4. Only anonymous
@@ -376,6 +423,7 @@ unsigned ds_import_resolve_count(void) {
 }
 
 int ds_import_is_trampoline(uint32_t guest_addr) {
+    if (jni_trampoline(guest_addr)) return 1;
     return guest_addr >= DS_IMPORT_TRAMP_BASE &&
            guest_addr < DS_IMPORT_TRAMP_BASE + g_count * 4u &&
            ((guest_addr - DS_IMPORT_TRAMP_BASE) & 3u) == 0;
@@ -393,6 +441,7 @@ static const char *name_for(uint32_t guest_addr) {
  * stop execution with an error; they must never masquerade as successful calls.
  */
 int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
+    if (cpu && jni_trampoline(guest_addr)) return jni_call(guest_addr,cpu);
     const char *name = name_for(guest_addr);
     if (!name || !cpu) return -1;
 
@@ -428,6 +477,16 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
         if (!g_errno) { g_errno=guest_alloc(4); if (!g_errno) return -31; }
         store32(guest_range(g_errno,4),2); /* ENOENT */
         cpu->r[0]=0;
+    } else if (!strcmp(name,"pthread_self")) {
+        cpu->r[0]=1; /* same single guest thread ID used by mutex ownership */
+    } else if (!strcmp(name,"pthread_equal")) {
+        cpu->r[0]=(cpu->r[0]==cpu->r[1]);
+    } else if (!strcmp(name,"__atomic_inc") || !strcmp(name,"__atomic_dec")) {
+        uint8_t *word=guest_range(cpu->r[0],4);
+        if (!word || (cpu->r[0]&3)) return -31;
+        uint32_t old=load32(word);
+        store32(word,old+(!strcmp(name,"__atomic_inc")?1u:UINT32_MAX));
+        cpu->r[0]=old;
     } else if (!strcmp(name, "__atomic_swap")) {
         /* Bionic ARM ABI: (new_value, address), returns the previous word.
          * Guest execution is single threaded; no host pointer is exposed. */

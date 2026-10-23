@@ -31,6 +31,15 @@ int main(void) {
     CHECK(call("__cxa_guard_acquire",0x1fff,0,0)==-31);
     CHECK(!call("__atomic_swap",0x12345678,0x1000,0) && cpu.r[0]==1 && word(0)==0x12345678);
     CHECK(call("__atomic_swap",42,0x1001,0)==-31 && word(0)==0x12345678);
+    CHECK(!call("__atomic_inc",0x1000,0,0) && cpu.r[0]==0x12345678 && word(0)==0x12345679);
+    CHECK(!call("__atomic_dec",0x1000,0,0) && cpu.r[0]==0x12345679 && word(0)==0x12345678);
+    CHECK(!call("__atomic_swap",UINT32_MAX,0x1000,0));
+    CHECK(!call("__atomic_inc",0x1000,0,0) && cpu.r[0]==UINT32_MAX && word(0)==0);
+    CHECK(!call("__atomic_dec",0x1000,0,0) && cpu.r[0]==0 && word(0)==UINT32_MAX);
+    CHECK(call("__atomic_inc",0x1fff,0,0)==-31);
+    CHECK(!call("pthread_self",0,0,0) && cpu.r[0]==1);
+    CHECK(!call("pthread_equal",1,1,0) && cpu.r[0]==1);
+    CHECK(!call("pthread_equal",1,2,0) && cpu.r[0]==0);
     CHECK(!call("sem_init",0x1000,0,0x3fffffff) && word(0)==0x7ffffffe);
     CHECK(call("sem_init",0x1000,1,0)==-32 && word(0)==0x7ffffffe);
     CHECK(!call("sem_init",0x1000,0,0x40000000) && cpu.r[0]==UINT32_MAX && word(0)==0x7ffffffe);
