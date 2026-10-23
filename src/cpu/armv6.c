@@ -98,6 +98,42 @@ static int vfp_memory(DsArmv6Cpu *cpu, const DsArmv6Image *image, uint32_t insn)
     return 0;
 }
 
+/* ARMv5 addressing mode 3: STRH, LDRH, LDRSB and LDRSH.
+ * Reject unpredictable operands and unaligned halfwords rather than inventing
+ * ARMv5 implementation-dependent results. Doubleword transfers stay unsupported. */
+static int extra_memory(DsArmv6Cpu *cpu, const DsArmv6Image *image, uint32_t insn) {
+    unsigned pre=(insn>>24)&1, up=(insn>>23)&1, imm=(insn>>22)&1;
+    unsigned wb=(insn>>21)&1, load=(insn>>20)&1;
+    unsigned rn=(insn>>16)&15, rd=(insn>>12)&15, kind=(insn>>5)&3;
+    unsigned rm=insn&15, writeback=!pre || wb;
+    if (!kind || (!load && kind!=1) || rd==15 ||
+        (!pre && wb) || (writeback && (rn==15 || rn==rd)) ||
+        (!imm && ((insn&0xf00) || rm==15 || (writeback && rn==rm)))) return -2;
+    uint32_t offset=imm ? ((insn>>4)&0xf0)|(insn&15) : cpu->r[rm];
+    uint32_t base=cpu->r[rn];
+    uint32_t updated=up ? base+offset : base-offset;
+    uint32_t addr=pre ? updated : base;
+    unsigned bytes=kind==2 ? 1 : 2;
+    if ((bytes==2 && (addr&1)) || addr<image->load_addr) return -3;
+    uint32_t off=addr-image->load_addr;
+    if (off>image->size || image->size-off<bytes) return -3;
+    uint8_t *memory=image->base+off;
+    if (load) {
+        uint32_t value=memory[0];
+        if (bytes==2) value|=(uint32_t)memory[1]<<8;
+        if (kind==2 && (value&0x80)) value|=0xffffff00u;
+        if (kind==3 && (value&0x8000)) value|=0xffff0000u;
+        cpu->r[rd]=value;
+    } else {
+        memory[0]=(uint8_t)cpu->r[rd];
+        memory[1]=(uint8_t)(cpu->r[rd]>>8);
+    }
+    if (writeback) cpu->r[rn]=updated;
+    cpu->pc+=4;
+    ++cpu->steps;
+    return 0;
+}
+
 static uint32_t operand2(DsArmv6Cpu *cpu, uint32_t insn, unsigned *carry) {
     uint32_t rm = cpu->r[insn & 0xfu];
     unsigned type = (insn >> 5) & 3u;
@@ -374,6 +410,9 @@ int ds_armv6_step(DsArmv6Cpu *cpu, const DsArmv6Image *image) {
         ++cpu->steps;
         return 0;
     }
+
+    if ((insn & 0x0e000090u) == 0x00000090u && (insn & 0x60u))
+        return extra_memory(cpu, image, insn);
 
     /* BX was handled above; SWI is surfaced as a host/runtime trap. */
     if ((insn & 0x0f000000u) == 0x0f000000u) return -4;

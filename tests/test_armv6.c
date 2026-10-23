@@ -184,8 +184,43 @@ static int memory_bounds(void) {
     return 0;
 }
 
+static int halfword_transfers(void) {
+    Fixture f; reset(&f,0xe1c021b4u,0); /* donor STRH r2,[r0,#20] */
+    f.cpu.r[0]=0x1080; f.cpu.r[2]=0x1234abcd; f.words[37]=0xeeeeeeee;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.words[37]==0xeeeeabcd);
+    reset(&f,0xe1d100b0u,0); f.cpu.r[1]=0x10fe; f.words[63]=0x80ff1234;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[0]==0x80ff);
+    reset(&f,0xe1d100f0u,0); f.cpu.r[1]=0x10fe; f.words[63]=0x80ff1234;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[0]==0xffff80ff);
+    reset(&f,0xe1d100d0u,0); f.cpu.r[1]=0x10ff; f.words[63]=0x80ff1234;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[0]==0xffffff80);
+    reset(&f,0xe13100b2u,0); /* LDRH r0,[r1,-r2]! */
+    f.cpu.r[1]=0x1100; f.cpu.r[2]=2; f.words[63]=0x7fff1234;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[0]==0x7fff && f.cpu.r[1]==0x10fe);
+    reset(&f,0xe0c100b2u,0); /* STRH r0,[r1],#2 */
+    f.cpu.r[1]=0x10fe; f.cpu.r[0]=0xabcd;
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[1]==0x1100 && f.words[63]==0xabcd0000);
+    reset(&f,0xe1df00b0u,0); f.words[2]=0x4321; /* PC-relative */
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.r[0]==0x4321);
+    const uint32_t invalid[]={0xe1f110b2,0xe1d1f0b0,0xe0f100b0,0xe19101b2,0xe19100bf};
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i) {
+        reset(&f,invalid[i],0); f.cpu.r[1]=0x1080;
+        CHECK(ds_armv6_step(&f.cpu,&f.image)==-2 && f.cpu.pc==0x1000 && f.cpu.steps==0);
+    }
+    const uint32_t bad_addr[]={0x0ffe,0x10ff,0x1100,0xfffffffe};
+    for(unsigned i=0;i<sizeof(bad_addr)/sizeof(*bad_addr);++i) {
+        reset(&f,0xe0c100b2u,0); f.cpu.r[1]=bad_addr[i]; f.cpu.r[0]=0xabcd;
+        uint32_t saved[64]; memcpy(saved,f.words,sizeof(saved));
+        CHECK(ds_armv6_step(&f.cpu,&f.image)==-3 && f.cpu.r[1]==bad_addr[i]);
+        CHECK(f.cpu.pc==0x1000 && f.cpu.steps==0 && !memcmp(saved,f.words,sizeof(saved)));
+    }
+    reset(&f,0x01d100b0u,0); /* failed EQ skips even invalid address */
+    CHECK(ds_armv6_step(&f.cpu,&f.image)==0 && f.cpu.pc==0x1004);
+    return 0;
+}
+
 static int unsupported(void) {
-    Fixture f; reset(&f,0xe1d100b0u,0); /* LDRH is not implemented yet */
+    Fixture f; reset(&f,0xe1c100d0u,0); /* LDRD remains unsupported */
     f.cpu.r[0]=0x1234u;
     CHECK(ds_armv6_step(&f.cpu,&f.image)==-2 && f.cpu.r[0]==0x1234u);
     reset(&f,0xe10f0000u,0); /* MRS must not be interpreted as TST */
@@ -238,7 +273,7 @@ static int vfp_transfers(void) {
 
 int main(int argc, char **argv) {
     const struct { const char *name; int (*run)(void); } tests[] = {
-        {"vfp_transfers",vfp_transfers},{"selftest",selftest},{"fetch_bounds",fetch_bounds},{"flags_only",flags_only},
+        {"halfword_transfers",halfword_transfers},{"vfp_transfers",vfp_transfers},{"selftest",selftest},{"fetch_bounds",fetch_bounds},{"flags_only",flags_only},
         {"arithmetic_flags",arithmetic_flags},{"carry_arithmetic",carry_arithmetic},
         {"register_shifts",register_shifts},{"rrx",rrx},{"arm_branches",arm_branches},
         {"blx_immediate",blx_immediate},{"thumb_immediates",thumb_immediates},

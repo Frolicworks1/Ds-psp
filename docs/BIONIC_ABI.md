@@ -91,9 +91,9 @@ first-constructor probe returns to its sentinel after 1,640 successful steps,
 including cleanup registration. Its two mappings (16,781,312 and 16,777,216 bytes)
 still fail ENOMEM. Returning from this routine does not establish a usable heap,
 successful game initialization or correctness of all interpreter instructions.
-The persistent sequence now returns from constructors 0–36 and stops in
-constructor 37 on unsupported STRH opcode 0xe1c021b4 at PC 0x001b58f0. The
-remaining 170 entries and JNI startup are untested. An explicit host
+The persistent sequence now returns from constructors 0–58 and stops in
+constructor 59 on unsupported `clock` at import trampoline PC 0xf000037c. The
+remaining 148 entries and JNI startup are untested. An explicit host
 experiment with an 18 MiB mapping pool now services the large allocation and
 returns after 1,584 steps; see the budget measurements below.
 
@@ -191,8 +191,8 @@ execution and are not counted as errno-return failures. Partial unmapping and
 repeated unmapping of holes do not underflow live-byte accounting. Counters reset
 on initialization or binding a different image.
 
-The persistent sequence has now reached constructor 37 without further mapping
-requests. Next: implement independently tested halfword transfers and continue the
+The persistent sequence has now reached constructor 59 without further mapping
+requests. Next: implement Bionic `clock` semantics and continue the
 sequence before reducing reservations or sharing unused capacity. Do not infer that unused space at this one
 checkpoint stays unused during gameplay. The supplied GTA PBP's MEMSIZE=1 and
 pool/streaming strings are reference clues only; no matching source was verified,
@@ -220,10 +220,10 @@ each routine checks a counter written by its predecessor before updating it.
 Other fixtures test sentinel entries, invalid metadata/targets, failure stopping
 and the exact instruction-limit boundary. Python 3 is required for this host test.
 
-Exact donor result with an 18 MiB mapping pool after VFP transfer support:
-208 total entries, 38 attempted, 37 returned, zero skipped, 170 pending;
-2,567 successful steps. Constructor index 37 starts at 0x001b5a98 and stops at
-0x001b58f0 (opcode 0xe1c021b4, STRH r2,[r0,#20]). Live/peak mapped bytes remain
+Exact donor result with an 18 MiB mapping pool after ARM halfword transfer support:
+208 total entries, 60 attempted, 59 returned, zero skipped, 148 pending;
+3,036 successful steps. Constructor index 59 starts at 0x002309b4 and stops at
+0xf000037c (unsupported `clock` import). Live/peak mapped bytes remain
 16,781,312, bridge use 1,616, program-break use zero, total mapped image+arena
 30,285,824. No allocation failures occurred. These remain partial measurements.
 
@@ -244,3 +244,15 @@ against Unicorn 2.1.4, checking all VFP registers, core registers, PC and memory
 It is optional (requires Unicorn and a host C compiler); normal CI tests require
 neither Unicorn nor donor files. Capstone 5.0.7 independently identified the donor
 VPUSH and current STRH boundary. No host float approximation was introduced.
+
+
+## ARM halfword and signed transfers
+
+STRH/LDRH/LDRSB/LDRSH support immediate and register offsets, adding/subtracting,
+pre/post indexing, writeback and PC-relative loads. Signed loads extend to 32 bits;
+stores preserve adjacent bytes. Unaligned halfwords, invalid operands, doubleword
+transfers and unprivileged variants stop explicitly. Address arithmetic wraps at
+32 bits, then the actual access is checked against the mapped image. Faults do not
+change memory, destination/base registers, PC or step count (the existing fetch
+path still refreshes the pipelined R15 value). Synthetic sanitizer tests and 240
+Unicorn comparisons cover supported addressing modes. No new gameplay claim.
