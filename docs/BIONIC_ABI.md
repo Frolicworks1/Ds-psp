@@ -323,7 +323,7 @@ These implement single-thread semantics only; spawning threads is still gated.
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
 NativeOnDrawFrame passes EAIO/MainActivity metadata lookup and stops at
-the gettimeofday import after EAIO metadata/buffer setup, when assets are mounted. Before initialization completes,
+FindClass("com/ea/blast/SystemAndroidDelegate"), when assets are mounted. Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
 
 
@@ -345,8 +345,8 @@ GetStaticMethodID matches the exact EAIO class, name and descriptor for native
 and separate from object references. Startup dispatches to its validated native export when explicitly bound; Shutdown
 invocation remains unsupported.
 Unknown classes/method signatures trap; no dummy asset manager or successful
-file operation is returned. First-draw progress with mounted assets is 341 interpreter steps before
-gettimeofday, 11,026 total including constructors and lifecycle.
+file operation is returned. First-draw progress with mounted assets is 85,114 interpreter steps before
+SystemAndroidDelegate lookup, 95,799 total including constructors and lifecycle.
 The JNI arena reservation now uses 68,424 total bridge bytes (including one 64 KiB byte-array buffer);
 the total mapped arena remains 30,285,824 bytes with zero allocation failures.
 
@@ -373,7 +373,7 @@ reading unused argument pointers. Duplicate platform starts fail; reference-tabl
 exhaustion leaves start retryable. Deleting local handles does not clear the
 singleton. Rebinding the image resets it. Activity teardown/recreation within one
 image remain unsupported. getAssets requires an explicitly mounted asset root.
-The startup-controls trace with assets reaches 11,146 steps; early input callbacks remain
+The startup-controls trace with assets reaches 95,919 steps; early input callbacks remain
 gated by incomplete game initialization.
 
 ### Extracted asset backend
@@ -422,7 +422,7 @@ interpreter is introduced. Native targets reset on image rebinding.
 
 EAIO's next GetJavaVM call writes the existing VM pointer to a checked, aligned
 guest output and returns JNI_OK. The donor then requests java/io/InputStream;
-that metadata is now supported. The current stop is the gettimeofday import.
+that metadata is now supported. The current stop is SystemAndroidDelegate class lookup.
 Automatic JNI local-frame cleanup remains unimplemented as above.
 
 ### Stream metadata and bounded byte arrays
@@ -443,6 +443,28 @@ argument. Region copies handle overlap. Exhaustion, unsupported lengths and
 invalid arguments stop; Java exceptions and automatic local-frame cleanup are
 still absent. Backing reservations remain until the image is unloaded.
 
-The real donor now reaches gettimeofday at 11,026 startup steps (11,146 with
+The real donor now reaches SystemAndroidDelegate at 95,799 startup steps (95,919 with
 input callbacks), with 68,424 bridge bytes and unchanged 30,285,824 mapped bytes.
 There is still no guest-issued asset read, frame or gameplay verification.
+
+### ARM32 wall-clock time
+
+`gettimeofday(tv, NULL)` obtains platform wall-clock time and explicitly writes
+seconds and microseconds as two little-endian 32-bit guest words. It does not
+copy the host timeval struct or substitute process CPU time. Seconds must fit
+signed ARM32 time_t; microseconds must be in [0,999999]. Output pointer bounds
+and alignment are validated before querying time. A null timeval with null
+timezone is a successful no-op. Non-null obsolete timezone arguments, host
+failure and unrepresentable time stop explicitly; errno translation for those
+unsupported cases remains unimplemented. Failure leaves guest output unchanged.
+
+Mocked host tests cover field layout, signed limits, subsecond precision,
+out-of-bounds/unaligned pointers, invalid microseconds and clock failure. The
+PSP newlib call compiles; actual PSP/PPSSPP wall-clock behavior is not verified.
+With the real host wall clock, both donor startup paths advance to
+`com/ea/blast/SystemAndroidDelegate`, with no new allocation failures.
+
+Inspection of the supplied APK shows this delegate has a nontrivial constructor
+using MainActivity services and package-manager access, plus string-returning
+hardware/environment queries. It cannot be treated as initialized empty class
+metadata. Its platform adaptation and Java string support remain next work.

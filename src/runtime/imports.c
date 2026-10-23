@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
+#include <sys/time.h>
 #ifdef __psp__
 #include <pspthreadman.h>
 #endif
@@ -739,6 +740,21 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
             return -32;
         cpu->r[0]=(uint32_t)now;
         if (out) store32(out,cpu->r[0]);
+    } else if (!strcmp(name, "gettimeofday")) {
+        /* ARM Bionic timeval is two signed 32-bit fields, regardless of the
+         * host libc layout. The obsolete timezone output is unsupported. */
+        if (cpu->r[1]) return -32;
+        uint8_t *out=cpu->r[0] ? guest_range(cpu->r[0],8) : NULL;
+        if (cpu->r[0] && (!out || (cpu->r[0]&3))) return -31;
+        if (out) {
+            struct timeval now;
+            if (gettimeofday(&now,NULL) || now.tv_sec>INT32_MAX ||
+                now.tv_sec<INT32_MIN || now.tv_usec<0 || now.tv_usec>=1000000)
+                return -32; /* Stop on unavailable/unrepresentable wall time. */
+            store32(out,(uint32_t)now.tv_sec);
+            store32(out+4,(uint32_t)now.tv_usec);
+        }
+        cpu->r[0]=0;
     } else if (!strcmp(name, "clock")) {
         /* Bionic ARM clock_t is signed 32-bit microseconds. PSP newlib's
          * clock() is uptime, so measure the single guest execution thread's
