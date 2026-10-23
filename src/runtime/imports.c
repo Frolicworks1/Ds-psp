@@ -23,7 +23,10 @@ static uint32_t g_errno;
 static uint32_t g_jvm,g_jenv,g_jrefs;
 #define JNI_REF_MAX 64u
 enum { JNI_CLASS_EAIO=1, JNI_CLASS_ACTIVITY, JNI_OBJECT_ACTIVITY, JNI_OBJECT_ASSETS,
-       JNI_CLASS_INPUT_STREAM, JNI_CLASS_ASSETS, JNI_CLASS_ASSET_DESCRIPTOR };
+       JNI_CLASS_INPUT_STREAM, JNI_CLASS_ASSETS, JNI_CLASS_ASSET_DESCRIPTOR, JNI_CLASS_STRING };
+#define JNI_STRING_MAX 16u
+#define JNI_STRING_OBJECT 300u
+static struct { uint32_t address; unsigned live; } g_strings[JNI_STRING_MAX];
 /* IDs are table indices; keep the first four bootstrap IDs stable. */
 static const struct { unsigned object,slot; const char *name,*signature; } jni_methods[]={
     {JNI_CLASS_EAIO,113,"Startup","(Landroid/content/res/AssetManager;)V"},
@@ -67,6 +70,7 @@ static uint32_t trampoline_for(unsigned id) {
 void ds_imports_init(void) {
     ds_assets_reset(&g_assets);
     memset(g_arrays,0,sizeof(g_arrays));
+    memset(g_strings,0,sizeof(g_strings));
     memset(g_names, 0, sizeof(g_names));
     g_count = 0;
     g_destructor_count = 0;
@@ -102,6 +106,7 @@ void ds_imports_bind_image(DsArmImage *image) {
     if (g_image != image) {
         ds_assets_reset(&g_assets);
         memset(g_arrays,0,sizeof(g_arrays));
+        memset(g_strings,0,sizeof(g_strings));
         g_destructor_count = 0;
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
@@ -239,6 +244,7 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
             else if (!strcmp(name,"java/io/InputStream")) object=JNI_CLASS_INPUT_STREAM;
             else if (!strcmp(name,"android/content/res/AssetManager")) object=JNI_CLASS_ASSETS;
             else if (!strcmp(name,"android/content/res/AssetFileDescriptor")) object=JNI_CLASS_ASSET_DESCRIPTOR;
+            else if (!strcmp(name,"java/lang/String")) object=JNI_CLASS_STRING;
             else {dspsp_log("unsupported JNI class: %s",name);return -32;}
             /* EAIO has no <clinit>. MainActivity's only initializer sets
              * activityExists=false, its default value. This creates class
@@ -263,6 +269,7 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
             unsigned object;
             if (g_jref[i].object==JNI_OBJECT_ACTIVITY) object=JNI_CLASS_ACTIVITY;
             else if (g_jref[i].object==JNI_OBJECT_ASSETS) object=JNI_CLASS_ASSETS;
+            else if (g_jref[i].object>=JNI_STRING_OBJECT && g_jref[i].object<JNI_STRING_OBJECT+JNI_STRING_MAX) object=JNI_CLASS_STRING;
             else return -32;
             int rc=jni_new_ref(object,0,&cpu->r[0]);if (rc) return rc;
         } else if (slot>=34 && slot<=36) { /* CallObjectMethod[/V/A]: getAssets() */
@@ -306,6 +313,43 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
             cpu->r[2]=manager;
             cpu->pc=g_eaio_startup&~1u;cpu->thumb=g_eaio_startup&1;
             return 0;
+        } else if (slot==167) { /* NewStringUTF: copy into bounded guest-owned storage. */
+            const char *value=guest_string(cpu->r[1]);
+            if (!value) return -31;
+            unsigned index;
+            for (index=0;index<JNI_STRING_MAX && g_strings[index].live;++index) {}
+            if (index==JNI_STRING_MAX) return -32;
+            size_t length=strlen(value);
+            if (length>=UINT32_MAX) return -32;
+            uint32_t address=guest_alloc((uint32_t)length+1u);
+            if (!address) return -32;
+            char *copy=guest_range(address,(uint32_t)length+1u);
+            if (!copy) return -31;
+            memcpy(copy,value,length+1u);
+            uint32_t ref;
+            int rc=jni_new_ref(JNI_STRING_OBJECT+index,0,&ref);
+            if (rc) return rc;
+            g_strings[index].address=address;g_strings[index].live=1;cpu->r[0]=ref;
+        } else if (slot==168 || slot==169 || slot==170) { /* UTF-8 String accessors. */
+            int i=jni_ref_index(cpu->r[1]);
+            if (i<0 || g_jref[i].object<JNI_STRING_OBJECT ||
+                g_jref[i].object>=JNI_STRING_OBJECT+JNI_STRING_MAX) return -31;
+            unsigned index=g_jref[i].object-JNI_STRING_OBJECT;
+            if (!g_strings[index].live) return -31;
+            const char *value=guest_range(g_strings[index].address,1);
+            if (!value || !guest_string(g_strings[index].address)) return -31;
+            if (slot==168) cpu->r[0]=(uint32_t)strlen(value);
+            else if (slot==169) {
+                if (cpu->r[2]) {
+                    uint8_t *is_copy=guest_range(cpu->r[2],4);
+                    if (!is_copy || (cpu->r[2]&3)) return -31;
+                    store32(is_copy,1);
+                }
+                cpu->r[0]=g_strings[index].address;
+            } else {
+                if (cpu->r[2]!=g_strings[index].address) return -31;
+                cpu->r[0]=0;
+            }
         } else if (slot==176) { /* NewByteArray, bounded reusable backing buffers */
             uint32_t length=cpu->r[1];
             if (length>JNI_ARRAY_BYTES) return -32;
