@@ -130,7 +130,8 @@ int main(void) {
     DsArmImage loaded; CHECK(ds_arm_loader_load(path,&loaded)==0);
     CHECK(!(loaded.heap_base & 4095) && !(loaded.brk_base & 4095));
     CHECK(loaded.heap_base+loaded.bridge_size==loaded.brk_base);
-    CHECK(loaded.brk_base+loaded.brk_size==loaded.stack_base);
+    CHECK(loaded.brk_base+loaded.brk_size==loaded.mmap_base);
+    CHECK(loaded.mmap_base+loaded.mmap_size==loaded.stack_base);
     CHECK(loaded.stack_base+loaded.stack_size==loaded.heap_base+loaded.heap_size);
     CHECK(loaded.brk_used==0 && loaded.heap_used==0);
     ds_arm_loader_unload(&loaded);

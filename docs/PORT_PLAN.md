@@ -32,7 +32,7 @@ binaries/assets and personal saves out of commits.
 | Stage | Work | Acceptance gate | Current state |
 | --- | --- | --- | --- |
 | M0: reproducible foundation | Restore existing source; reproduce EBOOT build; add CPU regression tests and bounded guest trace | PSP build/package passes; supported instruction regression groups pass under sanitizers; donor identity recorded | Build and 13 CPU groups pass locally; physical/emulator boot not yet verified |
-| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; first constructor reaches unsupported `mmap` after 1,198 steps |
+| M1: loader and linking | Validate ELF/program tables; guest address model; complete supported relocations and stable import ownership; initialize arrays/stack | Synthetic relocation/error fixtures pass; all 208 donor init-array entries are accounted for; unresolved targets stop with symbol/PC; no ELF header/data executed after a null branch | In progress: synthetic linking/import tests pass; seven data globals resolve; first constructor reaches unsupported `__aeabi_atexit` after 1,639 steps (large mappings fail ENOMEM) |
 | M2: CPU execution | Correct ARM/Thumb instruction decoding, flags, memory alignment and faults; implement required VFP or verified software equivalent | Deterministic instruction vectors and cross-checks against an independent ARM implementation; exact guest trace advances with bounded memory; unsupported encodings stop explicitly | Partial interpreter only; VFP and many instructions remain absent |
 | M3: Android/JNI startup | Build exact JNI table/lifecycle, native registrations, libc/Bionic, threads, timers, asset and file adapters | Original JNI_OnLoad/registration and app lifecycle complete without required stubbed calls; repeatable init/shutdown; heap/stack high-water logs | Unimplemented beyond a few memory/string imports |
 | M4: first genuine frame | Map exercised GLES 1.x functions to GU/GUM; handle state, geometry, textures, formats and render targets | Original game produces a recognizable menu/loading frame; captures and logs confirm real guest rendering; no fabricated image | Not reached |
@@ -120,10 +120,12 @@ a complete hostile-ELF validator: overlapping segments/tables and complete dynam
 symbol counts still need validation before M1 is complete.
 
 The exact donor now completes relocation and begins its first constructor.
-After 1,198 successful steps it stops at `mmap`. All seven data
+After 1,639 successful steps it stops at `__aeabi_atexit`. Its two roughly
+16 MiB mapping requests failed ENOMEM; advancing does not prove a usable heap. All seven data
 symbols have guest storage; standard output/error have a bounded log adapter.
 See [Bionic ABI](BIONIC_ABI.md) for verified layouts and service limitations.
 Mutex attributes and uncontended single-thread locking now have ABI/state tests.
 The program break now has a separate allocation pool and the stack has a reserved
-range. Next: implement mmap/munmap with tested mapping ownership, add memory-access
-guards, continue constructor tracing, and account for all 208 entries. JNI startup and complete ELF validation remain outstanding.
+range. Anonymous mmap/munmap now have tested mapping ownership within a 2 MiB
+pool. Next: investigate the larger memory requirement, implement C++ cleanup
+registration, add memory-access guards, and account for all 208 constructors. JNI startup and complete ELF validation remain outstanding.

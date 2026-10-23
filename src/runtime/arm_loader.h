@@ -16,6 +16,7 @@ typedef struct {
     uint32_t bridge_size;
     uint32_t brk_base, brk_size, brk_used;
     uint32_t stack_base, stack_size;
+    uint32_t mmap_base, mmap_size;
 } DsArmImage;
 
 int ds_arm_loader_load(const char *path, DsArmImage *out);

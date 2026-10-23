@@ -14,6 +14,8 @@ static DsArmImage *g_image;
 static uint32_t g_ctype_objects[3];
 static uint32_t g_stdio;
 static uint32_t g_errno;
+#define MMAP_PAGES 512u
+static uint8_t g_mapped[MMAP_PAGES];
 static uint32_t g_globals[3];
 
 static uint32_t trampoline_for(unsigned id) {
@@ -26,6 +28,7 @@ void ds_imports_init(void) {
     g_image = 0;
     g_stdio = 0;
     g_errno = 0;
+    memset(g_mapped, 0, sizeof(g_mapped));
     memset(g_globals, 0, sizeof(g_globals));
     memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
 }
@@ -50,6 +53,7 @@ void ds_imports_bind_image(DsArmImage *image) {
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
         g_errno = 0;
+        memset(g_mapped, 0, sizeof(g_mapped));
         memset(g_globals, 0, sizeof(g_globals));
     }
     g_image = image;
@@ -90,6 +94,59 @@ static void store32(uint8_t *p, uint32_t value) {
 static uint32_t load32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* ARM mmap: arguments 5/6 (fd/offset) are at SP and SP+4. Only anonymous
+ * private read/write mappings are supported; never fake file mappings or
+ * protections. Bitmap ownership permits partial unmaps and contiguous reuse. */
+static int mapping_call(const char *name, struct DsArmv6Cpu *cpu) {
+    uint32_t addr = cpu->r[0], size = cpu->r[1], error = 0;
+    uint32_t pages = size / 4096u + !!(size % 4096u);
+    uint32_t capacity = g_image->mmap_size / 4096u;
+    if (capacity > MMAP_PAGES || (g_image->mmap_base & 4095u) ||
+        (g_image->mmap_size & 4095u) ||
+        !guest_range(g_image->mmap_base, g_image->mmap_size)) return -31;
+    if (!size) error = 22;
+    else if (!strcmp(name, "mmap")) {
+        const uint8_t *args = guest_range(cpu->r[13], 8);
+        if (!args || (cpu->r[13] & 3)) return -31;
+        if (cpu->r[2] != 3 || cpu->r[3] != 0x22 || load32(args) != UINT32_MAX ||
+            load32(args + 4) != 0) {
+            dspsp_log("unsupported mmap prot=%x flags=%x fd=%x offset=%x",
+                      cpu->r[2], cpu->r[3], load32(args), load32(args+4));
+            return -32;
+        }
+        /* Non-fixed address is a hint; choosing another free address is valid. */
+        unsigned start = 0, run = 0;
+        for (unsigned i = 0; i < capacity; ++i) {
+            if (g_mapped[i]) run = 0;
+            else if (++run == pages) { start = i + 1 - run; break; }
+        }
+        if (run < pages) error = 12;
+        else {
+            uint32_t target = g_image->mmap_base + start * 4096u;
+            memset(guest_range(target, pages * 4096u), 0, pages * 4096u);
+            memset(g_mapped + start, 1, pages);
+            cpu->r[0] = target;
+            dspsp_log("guest mmap bytes=%u rounded=%u address=%08x", size, pages * 4096u, target);
+        }
+    } else {
+        uint64_t end = (uint64_t)addr + (uint64_t)pages * 4096u;
+        if (addr & 4095u) error = 22;
+        else if (addr < g_image->mmap_base || end >
+                 (uint64_t)g_image->mmap_base + g_image->mmap_size) return -32;
+        else {
+            unsigned start = (addr - g_image->mmap_base) / 4096u;
+            memset(g_mapped + start, 0, pages);
+            cpu->r[0] = 0;
+        }
+    }
+    if (error) {
+        dspsp_log("guest %s failed bytes=%u errno=%u", name, size, error);
+        store32(guest_range(g_errno, 4), error);
+        cpu->r[0] = UINT32_MAX;
+    }
+    return 0;
 }
 
 /* Single guest execution thread (id 1). No host pthread objects are used.
@@ -305,14 +362,18 @@ int ds_import_call(uint32_t guest_addr, struct DsArmv6Cpu *cpu) {
         dspsp_log("guest stack corruption detected pc=0x%08x", cpu->pc);
         return -33;
     }
-    if (!strcmp(name, "__errno") || !strcmp(name, "sbrk")) {
+    if (!strcmp(name, "__errno") || !strcmp(name, "sbrk") ||
+        !strcmp(name, "mmap") || !strcmp(name, "munmap")) {
         if (!g_image) return -31;
         if (!g_errno) {
             g_errno = guest_alloc(4);
             if (!g_errno) return -31;
             store32(guest_range(g_errno, 4), 0);
         }
-        if (!strcmp(name, "__errno")) cpu->r[0] = g_errno;
+        if (!strcmp(name, "mmap") || !strcmp(name, "munmap")) {
+            int rc = mapping_call(name, cpu);
+            if (rc) return rc;
+        } else if (!strcmp(name, "__errno")) cpu->r[0] = g_errno;
         else {
             /* sbrk takes a signed 32-bit increment and returns the OLD break. */
             int64_t delta = cpu->r[0] <= INT32_MAX ? (int64_t)cpu->r[0] :

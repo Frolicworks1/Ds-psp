@@ -55,7 +55,11 @@ int main(int argc, char **argv) {
             memcpy(&instruction,memory.base+offset,width);
         printf("step=%u pc=0x%08x mode=%s opcode=0x%08x\n",i,cpu.pc,cpu.thumb?"Thumb":"ARM",instruction);
         rc=ds_armv6_step(&cpu,&memory);
-        if (rc) { printf("STOP error=%d after_steps=%u\n",rc,cpu.steps); break; }
+        if (rc) {
+            printf("STOP error=%d after_steps=%u r0=%08x r1=%08x r2=%08x r3=%08x sp=%08x\n",
+                   rc,cpu.steps,cpu.r[0],cpu.r[1],cpu.r[2],cpu.r[3],cpu.r[13]);
+            break;
+        }
         if (i+1==limit) printf("STOP bounded instruction limit reached.\n");
     }
     ds_arm_loader_unload(&mapped);

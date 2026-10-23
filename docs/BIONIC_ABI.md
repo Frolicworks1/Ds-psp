@@ -87,10 +87,11 @@ not reproduced. Bad guest memory or alignment stops before state mutation.
 ## Execution checkpoint
 
 All seven required data globals resolve for the recorded donor. The bounded
-first-constructor probe now reaches `mmap` at trampoline `0xf0000264` after
-1,198 successful steps, then stops. No complete constructor, JNI initialization
-or gameplay is established. Next, implement bounded mmap/munmap storage with explicit mapping ownership,
-flags, failure semantics and tests. No mapping support is currently claimed.
+first-constructor probe now reaches `__aeabi_atexit` at trampoline `0xf0000248` after
+1,639 successful steps, then stops. No complete constructor, JNI initialization
+or gameplay is established. The donor requested mappings of 16,781,312 and 16,777,216 bytes; both returned
+ENOMEM under the current budget. Continued execution does not prove that its
+allocator is usable. Investigate the larger memory requirement before gameplay.
 
 ELF PLT stubs that load PC directly dispatch registered imports before instruction
 fetch; synthetic tests cover this path independently of the donor.
@@ -99,8 +100,8 @@ fetch; synthetic tests cover this path independently of the donor.
 
 The loader rounds the mapped ELF span up to a 4096-byte boundary, then appends
 the same 8 MiB arena as before. It now partitions that arena into 1 MiB for bridge
-objects/imported malloc, 6 MiB for the guest program break, and 1 MiB for the
-stack. These are initial diagnostic budgets, not verified gameplay budgets.
+objects/imported malloc, 4 MiB for the guest program break, 2 MiB for anonymous
+mappings, and 1 MiB for the stack. These are initial diagnostic budgets, not verified gameplay budgets.
 `heap_size` still describes the entire mapped arena; `bridge_size` limits the
 bridge bump allocator. Main and the host probe use the explicit stack range.
 Synthetic images without a partition retain their previous heap-only behavior.
@@ -115,3 +116,23 @@ Future thread support must replace the single errno slot with thread-local state
 Pool separation prevents allocator overlap; it does not provide memory access
 permissions or a stack guard page. The interpreter still sees a contiguous arena.
 Bridge free/realloc and general memory mapping remain incomplete.
+
+## Anonymous mappings
+
+`mmap` supports ARM32 arguments (the fd and offset are on the guest stack),
+PROT_READ|PROT_WRITE (3), MAP_PRIVATE|MAP_ANONYMOUS (0x22), fd=-1 and offset=0.
+Non-fixed address hints may be ignored. A 512-page ownership bitmap implements
+first-fit contiguous allocation inside the dedicated 2 MiB pool. New mappings
+are zero-filled, including reused pages. `munmap` rounds lengths to pages,
+supports partial release and unmapped holes within this pool, and rejects ranges
+outside the pool rather than touching bridge, program-break, stack or ELF bytes.
+Zero lengths and unaligned unmap addresses return EINVAL; exhausted/oversized
+mapping requests return MAP_FAILED with ENOMEM, without changing ownership.
+
+Fixed mappings, file-backed/shared mappings, other protections, mmap64, mremap
+and mprotect stop as unsupported. Unmapping releases allocation ownership but
+does not yet enforce access faults in the flat interpreter memory model.
+The prior 6 MiB program-break pool is reduced to 4 MiB to retain the total 8 MiB
+arena; this is a diagnostic allocation budget change, not a PSP model guarantee.
+The next work includes larger-budget measurements, C++ cleanup registration and
+constructor enumeration. No successful donor mmap is recorded yet.

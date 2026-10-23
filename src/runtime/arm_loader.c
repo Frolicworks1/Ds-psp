@@ -102,8 +102,10 @@ int ds_arm_loader_load(const char *path, DsArmImage *out) {
     out->heap_used = 0;
     out->bridge_size = 1024u * 1024u;
     out->brk_base = out->heap_base + out->bridge_size;
-    out->brk_size = 6u * 1024u * 1024u;
-    out->stack_base = out->brk_base + out->brk_size;
+    out->brk_size = 4u * 1024u * 1024u;
+    out->mmap_base = out->brk_base + out->brk_size;
+    out->mmap_size = 2u * 1024u * 1024u;
+    out->stack_base = out->mmap_base + out->mmap_size;
     out->stack_size = 1024u * 1024u;
     return 0;
 }
