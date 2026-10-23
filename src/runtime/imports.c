@@ -18,7 +18,10 @@ static DsArmImage *g_image;
 static uint32_t g_ctype_objects[3];
 static uint32_t g_stdio;
 static uint32_t g_errno;
-static uint32_t g_jvm,g_jenv;
+static uint32_t g_jvm,g_jenv,g_jrefs;
+#define JNI_REF_MAX 64u
+/* Object identity is distinct from the lifetime of each local/global handle. */
+static struct { unsigned object,global; } g_jref[JNI_REF_MAX];
 #define JNI_TRAMP_BASE 0xf1000000u
 #define JNI_ENV_SLOTS 233u
 #define JNI_VM_SLOTS 8u
@@ -42,7 +45,8 @@ void ds_imports_init(void) {
     g_image = 0;
     g_stdio = 0;
     g_errno = 0;
-    g_jvm = g_jenv = 0;
+    g_jvm = g_jenv = g_jrefs = 0;
+    memset(g_jref,0,sizeof(g_jref));
     memset(g_mapped, 0, sizeof(g_mapped));
     memset(&g_memory_stats, 0, sizeof(g_memory_stats));
     memset(g_globals, 0, sizeof(g_globals));
@@ -70,7 +74,8 @@ void ds_imports_bind_image(DsArmImage *image) {
         memset(g_ctype_objects, 0, sizeof(g_ctype_objects));
         g_stdio = 0;
         g_errno = 0;
-        g_jvm = g_jenv = 0;
+        g_jvm = g_jenv = g_jrefs = 0;
+        memset(g_jref,0,sizeof(g_jref));
         memset(g_mapped, 0, sizeof(g_mapped));
         memset(&g_memory_stats, 0, sizeof(g_memory_stats));
         memset(g_globals, 0, sizeof(g_globals));
@@ -119,7 +124,8 @@ int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env) {
     if (!vm || !env || !g_image) return -1;
     *vm=*env=0;
     if (!g_jvm) {
-        unsigned bytes=(2+JNI_VM_SLOTS+JNI_ENV_SLOTS)*4;
+        unsigned table_bytes=(2+JNI_VM_SLOTS+JNI_ENV_SLOTS)*4;
+        unsigned bytes=table_bytes+(JNI_REF_MAX+2)*4;
         uint32_t addr=guest_alloc(bytes);
         if (!addr) return -1;
         uint8_t *p=guest_range(addr,bytes); memset(p,0,bytes);
@@ -127,9 +133,23 @@ int ds_imports_prepare_jni(uint32_t *vm,uint32_t *env) {
         for (unsigned i=3;i<JNI_VM_SLOTS;++i) store32(p+8+i*4,JNI_TRAMP_BASE+i*4);
         for (unsigned i=4;i<JNI_ENV_SLOTS;++i)
             store32(p+8+(JNI_VM_SLOTS+i)*4,JNI_TRAMP_BASE+(JNI_VM_SLOTS+i)*4);
-        g_jvm=addr;g_jenv=addr+4;
+        g_jvm=addr;g_jenv=addr+4;g_jrefs=addr+table_bytes;
     }
     *vm=g_jvm;*env=g_jenv; return 0;
+}
+
+static int jni_ref_index(uint32_t handle) {
+    if (!g_jrefs || handle<g_jrefs || handle-g_jrefs>=JNI_REF_MAX*4 || (handle&3)) return -1;
+    unsigned index=(handle-g_jrefs)/4;
+    return g_jref[index].object ? (int)index : -1;
+}
+static int jni_new_ref(unsigned object,unsigned global,uint32_t *out) {
+    for (unsigned i=0;i<JNI_REF_MAX;++i) if (!g_jref[i].object) {
+        g_jref[i].object=object;g_jref[i].global=global;
+        *out=g_jrefs+i*4;return 0;
+    }
+    /* Throwing OutOfMemoryError is not implemented; stop rather than invent it. */
+    return -32;
 }
 
 static int jni_trampoline(uint32_t addr) {
@@ -150,7 +170,45 @@ static int jni_call(uint32_t addr,DsArmv6Cpu *cpu) {
         slot-=JNI_VM_SLOTS;
         if (cpu->r[0]!=g_jenv) return -31;
         if (slot==4) cpu->r[0]=0x10006; /* GetVersion */
-        else {dspsp_log("unsupported JNIEnv slot=%u",slot);return -32;}
+        else if (slot==6) { /* FindClass: only verified, initialized metadata. */
+            const char *name=guest_string(cpu->r[1]);if (!name) return -31;
+            if (strcmp(name,"com/ea/EAIO/EAIO")) {
+                dspsp_log("unsupported JNI class: %s",name);return -32;
+            }
+            /* This APK's EAIO class declares no <clinit>. Its native method
+             * bodies are separate from this class-reference operation. */
+            int rc=jni_new_ref(1,0,&cpu->r[0]);if (rc) return rc;
+        } else if (slot==113) { /* GetStaticMethodID: exact class/name/signature */
+            int i=jni_ref_index(cpu->r[1]);
+            const char *name=guest_string(cpu->r[2]),*signature=guest_string(cpu->r[3]);
+            if(i<0 || !name || !signature)return -31;
+            unsigned method;
+            if(g_jref[i].object==1 && !strcmp(name,"Startup") &&
+                !strcmp(signature,"(Landroid/content/res/AssetManager;)V")) method=0;
+            else if(g_jref[i].object==1 && !strcmp(name,"Shutdown") && !strcmp(signature,"()V")) method=1;
+            else {dspsp_log("unsupported JNI static method: %s %s",name,signature);return -32;}
+            cpu->r[0]=g_jrefs+(JNI_REF_MAX+method)*4;
+        } else if (slot==232) { /* GetObjectRefType, invalid/null -> JNIInvalidRefType */
+            int i=jni_ref_index(cpu->r[1]);
+            cpu->r[0]=i<0?0:g_jref[i].global?2:1;
+        } else if (slot==21 || slot==25) { /* NewGlobalRef / NewLocalRef */
+            if (!cpu->r[1]) cpu->r[0]=0;
+            else {
+                int i=jni_ref_index(cpu->r[1]);if(i<0)return -31;
+                int rc=jni_new_ref(g_jref[i].object,slot==21,&cpu->r[0]);if(rc)return rc;
+            }
+        } else if (slot==22 || slot==23) { /* DeleteGlobalRef / DeleteLocalRef */
+            if (cpu->r[1]) {
+                int i=jni_ref_index(cpu->r[1]);if(i<0 || g_jref[i].global!=(slot==22))return -31;
+                memset(&g_jref[i],0,sizeof(g_jref[i]));
+            }
+            cpu->r[0]=0;
+        } else if (slot==24) { /* IsSameObject, including null references */
+            int a=cpu->r[1]?jni_ref_index(cpu->r[1]):-1;
+            int b=cpu->r[2]?jni_ref_index(cpu->r[2]):-1;
+            if ((cpu->r[1] && a<0) || (cpu->r[2] && b<0))return -31;
+            cpu->r[0]=a<0 || b<0 ? a==b : g_jref[a].object==g_jref[b].object;
+        } else {dspsp_log("unsupported JNIEnv slot=%u r1=%08x r2=%08x r3=%08x",slot,cpu->r[1],cpu->r[2],cpu->r[3]);return -32;}
     }
     cpu->pc=cpu->r[14]&~1u;cpu->thumb=cpu->r[14]&1;return 0;
 }

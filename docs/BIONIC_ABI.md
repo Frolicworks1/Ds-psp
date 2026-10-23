@@ -312,8 +312,7 @@ The guest JavaVM/JNIEnv are actual pointer-to-table objects in the bridge arena.
 Reserved slots are zero; callable slots point into a separate interpreter trap
 range. GetEnv validates the VM/output pointer and returns JNI_EVERSION with a null
 output for unsupported versions. GetVersion reports JNI 1.6. The one current guest
-thread is attached; attach/detach, class/object/member and all other unimplemented
-methods trap. Tables reset on image rebinding and do not consume the libc import
+thread is attached; attach/detach and unimplemented class/object/member operations trap. Tables reset on image rebinding and do not consume the libc import
 registry's remaining slots. No host pointer is placed into guest memory.
 
 `__atomic_inc` and `__atomic_dec` now return the old 32-bit word and wrap the stored
@@ -323,5 +322,30 @@ These implement single-thread semantics only; spawning threads is still gated.
 
 All constructors, JNI_OnLoad (returns 0x10004), NativeOnCreate, surface creation and
 change, keyboard visibility and window focus complete in the host startup probe.
-NativeOnDrawFrame stops at FindClass("com/ea/EAIO/EAIO"). Before that completes,
+NativeOnDrawFrame passes EAIO metadata lookup and stops at
+FindClass("com/ea/blast/MainActivity"). Before initialization completes,
 original input callbacks return early; callback returns are not gameplay evidence.
+
+
+### JNI reference and EAIO metadata support
+
+The bridge reserves 64 opaque guest reference slots, independent from object
+identity. FindClass currently recognizes only `com/ea/EAIO/EAIO`, confirmed in the
+supplied APK with no `<clinit>` static initializer. Each lookup returns a local
+reference to its class identity. NewGlobalRef/NewLocalRef create independent
+handles; deleting a reference invalidates only that handle. Invalid handles and
+wrong-kind deletions stop; null reference copying/deletion follows JNI semantics.
+IsSameObject compares identity, and GetObjectRefType reports local/global/invalid.
+Slots are reused after deletion and reset on image rebinding. Exhaustion stops
+explicitly; throwing OutOfMemoryError and automatic JNI local-frame cleanup are
+not implemented yet.
+
+GetStaticMethodID matches the exact EAIO class, name and descriptor for native
+`Startup(Landroid/content/res/AssetManager;)V` and `Shutdown()V`. IDs are stable
+and separate from object references. This is method metadata only: invoking those
+methods remains unsupported until the asset-manager/native-call bridge exists.
+Unknown classes/method signatures trap; no dummy asset manager or successful
+file operation is returned. First-draw progress is 90 interpreter steps before
+MainActivity class lookup, 10,775 total including constructors and lifecycle.
+The JNI arena reservation increases total bridge use from 2,592 to 2,856 bytes;
+the total mapped arena remains 30,285,824 bytes with zero allocation failures.
